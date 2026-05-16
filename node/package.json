@@ -1,0 +1,18 @@
+{
+  "name": "codex-remote-proxy-node",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node.js local proxy for Codex remote ChatGPT login patch",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "check": "node scripts/configure-codex-proxy.mjs check",
+    "install-proxy": "node scripts/configure-codex-proxy.mjs install"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "fzstd": "^0.1.1"
+  }
+}

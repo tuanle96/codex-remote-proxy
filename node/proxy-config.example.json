@@ -1,0 +1,20 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 15100,
+    "logLevel": "info"
+  },
+  "upstream": {
+    "baseUrl": "https://your-openai-compatible-service.example.com",
+    "apiKey": "sk-your-real-upstream-api-key",
+    "timeoutMs": 300000,
+    "verifySsl": true,
+    "authHeader": "authorization",
+    "authScheme": "Bearer",
+    "extraHeaders": {}
+  },
+  "proxy": {
+    "overrideAuthorization": true,
+    "requestIdHeader": "x-client-request-id"
+  }
+}

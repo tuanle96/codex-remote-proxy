@@ -1,0 +1,20 @@
+[server]
+host = "127.0.0.1"
+port = 15100
+log_level = "INFO"
+
+[upstream]
+base_url = "https://your-openai-compatible-service.example.com"
+api_key = "sk-your-real-upstream-api-key"
+timeout_seconds = 300.0
+verify_ssl = true
+auth_header = "authorization"
+auth_scheme = "Bearer"
+
+[upstream.extra_headers]
+# Example:
+# api-version = "2025-04-01-preview"
+
+[proxy]
+override_authorization = true
+request_id_header = "x-client-request-id"
