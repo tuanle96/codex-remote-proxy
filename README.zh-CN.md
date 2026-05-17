@@ -1,3 +1,5 @@
+![Codex Remote Proxy Banner](./assets/banner.png)
+
 # Codex Remote Proxy 中文文档
 
 Codex Remote Proxy 的作用很直接：
