@@ -10,7 +10,6 @@ logs/
 *.log
 
 # Secrets / local runtime config
-python/proxy-config.toml
 node/proxy-config.json
 .env
 .env.*
@@ -19,23 +18,6 @@ node/proxy-config.json
 *.bak
 *.tmp
 *.temp
-
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-.venv/
-venv/
-python/.venv/
-python/venv/
-*.egg-info/
 
 # Node
 node_modules/
@@ -51,7 +33,9 @@ coverage/
 
 # Local verification leftovers
 /scripts/__pycache__/
-/python/__pycache__/
 /node/node_modules/
 /node/.npm/
+/local_docs/
 /local_docs
+/python/
+/__pycache__/

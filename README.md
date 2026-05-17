@@ -6,6 +6,12 @@ Codex Remote Proxy lets Codex stay signed into ChatGPT for remote-control featur
 
 [中文文档](./README.zh-CN.md)
 
+Published on npm:
+
+```bash
+npm install -g @cluic/codex-remote-proxy
+```
+
 ## What It Solves
 
 Codex splits request routing and authentication across two local files:
@@ -21,31 +27,36 @@ This project inserts a local proxy that:
 2. forwards them to the real upstream
 3. rewrites `Authorization` to the real upstream API key
 
-## Recommended Path
+## Recommended Installation
 
 The Node implementation is the recommended and most tested path for successful forwarding and conversations.
 
-Before using the root CLI:
+### Global install
 
 ```bash
-cd node
-npm install
-cd ..
+npm install -g @cluic/codex-remote-proxy
 ```
 
 Then run:
 
 ```bash
-node cli/codex-remote-proxy.mjs install
+crp start
 ```
 
-Or run non-interactively:
+### Without global install
 
 ```bash
-node cli/codex-remote-proxy.mjs install \
-  --impl node \
-  --upstream-base-url https://your-upstream.example.com \
-  --api-key sk-your-key
+npx @cluic/codex-remote-proxy start
+```
+
+### From this repository
+
+If you are running directly from the repository:
+
+```bash
+cd node
+npm install
+node bin/crp.mjs start
 ```
 
 After setup:
@@ -54,66 +65,73 @@ After setup:
 2. Sign in with your ChatGPT account
 3. Use Codex normally
 
-## Root CLI
+## Global Home
 
-Entrypoint:
+The CLI manages its own files under:
 
-```bash
-node cli/codex-remote-proxy.mjs
+```text
+~/.codex-remote-proxy/
 ```
+
+This directory is used for:
+
+- runtime config
+- managed state
+- proxy logs
+- optional local shim files
+
+## Global CLI
 
 Main commands:
 
-- `check`
+- `crp check`
   Inspect Codex config, auth mode, runtime availability, and managed service state
 
-- `install`
+- `crp start`
   Prompt for or accept `base_url` and `api_key`, choose a free port, patch Codex, and start the proxy in the background by default
 
-- `status`
-  Show managed service status and health
+- `crp install`
+  Compatibility alias for `crp start`
 
-- `stop`
+- `crp status`
+  Show managed service status and health. If the proxy is running but not managed by this CLI, it will try to detect that too
+
+- `crp stop`
   Stop the managed service
 
-- `guide`
+- `crp guide`
   Print AI-oriented usage guidance
 
 Machine-readable examples:
 
 ```bash
-node cli/codex-remote-proxy.mjs check --json
-node cli/codex-remote-proxy.mjs guide --json
-node cli/codex-remote-proxy.mjs status --json
+crp check --json
+crp guide --json
+crp status --json
 ```
 
 ## For AI Assistants
 
 Recommended flow:
 
-1. Run `node cli/codex-remote-proxy.mjs check --json`
+1. Run `crp check --json`
 2. Read `recommendedImplementation`
 3. If Node dependencies are ready, prefer `node`
-4. Run `install`
+4. Run `crp start`
 5. Read `proxyUrl`, `pid`, and `health` from the JSON result
-6. Use `status --json` for later verification
+6. Use `crp status --json` for later verification
 
 Notes:
 
-- `install` modifies `~/.codex/config.toml` and creates a backup
+- `start` modifies `~/.codex/config.toml` and creates a backup
 - the managed proxy runs in the background by default
-- the Node path currently requires `cd node && npm install`
-- in restricted environments, stale managed state may not be removable automatically
+- managed state and logs live under `~/.codex-remote-proxy/`
+- when running directly from this repository, install Node dependencies first
 
 ## Implementations
 
 - [`node/`](./node)
-  Recommended. Handles compressed Codex request bodies and is the most validated path.
+  The packaged npm implementation.
 
-- [`python/`](./python)
-  Alternative implementation for Python-first users or further experimentation.
-
-## Additional Docs
-
-- [`docs/README.zh-CN.md`](./docs/README.zh-CN.md)
+- [`README.zh-CN.md`](./README.zh-CN.md)
   Chinese documentation
