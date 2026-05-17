@@ -40,12 +40,14 @@ npm install -g @cluic/codex-remote-proxy
 Then run:
 
 ```bash
+crp init
 crp start
 ```
 
 ### Without global install
 
 ```bash
+npx @cluic/codex-remote-proxy init
 npx @cluic/codex-remote-proxy start
 ```
 
@@ -80,6 +82,46 @@ This directory is used for:
 - proxy logs
 - optional local shim files
 
+## Secret Handling
+
+You do not have to pass `base_url` and `api_key` to `crp start` every time.
+
+Recommended options:
+
+### Option 1: Save once locally
+
+```bash
+crp init
+crp start
+```
+
+`crp init` stores the upstream configuration under:
+
+```text
+~/.codex-remote-proxy/config.json
+```
+
+After that, later runs only need:
+
+```bash
+crp start
+```
+
+### Option 2: Use environment variables
+
+```bash
+export CRP_UPSTREAM_BASE_URL="https://your-upstream.example.com"
+export CRP_UPSTREAM_API_KEY="sk-your-key"
+crp start
+```
+
+`crp start` resolves values in this order:
+
+1. CLI flags
+2. Environment variables
+3. Saved config from `crp init`
+4. Interactive prompts
+
 ## Global CLI
 
 Main commands:
@@ -89,6 +131,9 @@ Main commands:
 
 - `crp start`
   Prompt for or accept `base_url` and `api_key`, choose a free port, patch Codex, and start the proxy in the background by default
+
+- `crp init`
+  Save upstream settings once under `~/.codex-remote-proxy/` so later `crp start` calls do not require secrets again
 
 - `crp install`
   Compatibility alias for `crp start`
@@ -117,9 +162,10 @@ Recommended flow:
 1. Run `crp check --json`
 2. Read `recommendedImplementation`
 3. If Node dependencies are ready, prefer `node`
-4. Run `crp start`
-5. Read `proxyUrl`, `pid`, and `health` from the JSON result
-6. Use `crp status --json` for later verification
+4. Ask the user to run `crp init` once locally, or rely on environment variables already set outside the AI session
+5. Run `crp start`
+6. Read `proxyUrl`, `pid`, and `health` from the JSON result
+7. Use `crp status --json` for later verification
 
 Notes:
 
@@ -127,6 +173,7 @@ Notes:
 - the managed proxy runs in the background by default
 - managed state and logs live under `~/.codex-remote-proxy/`
 - when running directly from this repository, install Node dependencies first
+- `crp init` or environment variables can keep secrets out of later AI interactions
 
 ## Implementations
 

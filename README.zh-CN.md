@@ -36,12 +36,14 @@ npm install -g @cluic/codex-remote-proxy
 然后执行：
 
 ```bash
+crp init
 crp start
 ```
 
 ### 不做全局安装
 
 ```bash
+npx @cluic/codex-remote-proxy init
 npx @cluic/codex-remote-proxy start
 ```
 
@@ -74,6 +76,46 @@ CLI 统一管理目录：
 - 代理日志
 - 可选的本地 shim 文件
 
+## 密钥处理方式
+
+你不必每次都把 `base_url` 和 `api_key` 再传给 `crp start`。
+
+推荐两种方式：
+
+### 方式 1：本地保存一次
+
+```bash
+crp init
+crp start
+```
+
+`crp init` 会把配置保存到：
+
+```text
+~/.codex-remote-proxy/config.json
+```
+
+之后只需要：
+
+```bash
+crp start
+```
+
+### 方式 2：使用环境变量
+
+```bash
+export CRP_UPSTREAM_BASE_URL="https://your-upstream.example.com"
+export CRP_UPSTREAM_API_KEY="sk-your-key"
+crp start
+```
+
+`crp start` 的取值优先级是：
+
+1. CLI 参数
+2. 环境变量
+3. `crp init` 保存的本地配置
+4. 交互式输入
+
 ## 全局 CLI
 
 主要命令：
@@ -83,6 +125,9 @@ CLI 统一管理目录：
 
 - `crp start`
   提示输入或接收 `base_url` / `api_key`，自动选择空闲端口，修改 Codex 配置，并默认后台启动代理
+
+- `crp init`
+  先把上游配置安全保存到 `~/.codex-remote-proxy/`，以后 `crp start` 不需要再重复输入密钥
 
 - `crp install`
   与 `crp start` 等价的兼容别名
@@ -111,9 +156,10 @@ crp status --json
 1. 先跑 `crp check --json`
 2. 读取 `recommendedImplementation`
 3. 如果 Node 依赖就绪，优先走 `node`
-4. 再跑 `crp start`
-5. 从返回结果中读取 `proxyUrl`、`pid`、`health`
-6. 之后用 `crp status --json` 做确认
+4. 让用户先在本地跑一次 `crp init`，或者提前在系统里设置好环境变量
+5. 再跑 `crp start`
+6. 从返回结果中读取 `proxyUrl`、`pid`、`health`
+7. 之后用 `crp status --json` 做确认
 
 注意：
 
@@ -121,6 +167,7 @@ crp status --json
 - `install` 会先创建备份
 - 托管状态和日志保存在 `~/.codex-remote-proxy/`
 - 如果你是直接从当前仓库运行，需要先执行 `cd node && npm install`
+- `crp init` 或环境变量模式可以避免后续 AI 直接接触密钥
 
 ## 实现目录
 

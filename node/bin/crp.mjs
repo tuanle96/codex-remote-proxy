@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import net from "node:net";
 import readline from "node:readline/promises";
@@ -15,8 +15,15 @@ const BIN_DIR = resolve(GLOBAL_HOME, "bin");
 const CRP_SHIM_PATH = resolve(BIN_DIR, "crp");
 const STATE_FILE = resolve(GLOBAL_HOME, "state.json");
 const LOG_FILE = resolve(GLOBAL_HOME, "proxy.log");
+const USER_CONFIG_FILE = resolve(GLOBAL_HOME, "config.json");
 const NODE_RUNTIME_CONFIG_PATH = resolve(GLOBAL_HOME, "node", "proxy-config.json");
 const OPENAI_SECTION_HEADER = "[model_providers.OpenAI]";
+const ENV_KEYS = {
+  upstreamBaseUrl: "CRP_UPSTREAM_BASE_URL",
+  apiKey: "CRP_UPSTREAM_API_KEY",
+  listenHost: "CRP_LISTEN_HOST",
+  listenPort: "CRP_LISTEN_PORT"
+};
 
 function parseCommandLine(argv) {
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
@@ -48,6 +55,7 @@ function parseCommandLine(argv) {
 function printHelp() {
   console.log("Usage:");
   console.log("  crp check [--json] [--codex-config PATH] [--auth PATH]");
+  console.log("  crp init [--json] [--upstream-base-url URL] [--api-key KEY] [--listen-host 127.0.0.1] [--listen-port PORT]");
   console.log("  crp start [--json] [--upstream-base-url URL] [--api-key KEY] [--listen-host 127.0.0.1] [--listen-port PORT] [--debug]");
   console.log("  crp install [same as start]");
   console.log("  crp status [--json]");
@@ -77,6 +85,20 @@ function readJson(path) {
     return {};
   }
   return JSON.parse(readFileSync(path, "utf8"));
+}
+
+function loadUserConfig() {
+  return readJson(USER_CONFIG_FILE);
+}
+
+function writeUserConfig(config) {
+  ensureStateDirs();
+  writeFileSync(USER_CONFIG_FILE, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  try {
+    chmodSync(USER_CONFIG_FILE, 0o600);
+  } catch {
+    // Best effort only.
+  }
 }
 
 function splitLines(text) {
@@ -270,6 +292,10 @@ async function promptValue(question, defaultValue = "") {
   }
 }
 
+async function promptSecret(question, defaultValue = "") {
+  return await promptValue(question, defaultValue);
+}
+
 async function waitForHealthyProxy(proxyUrl, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
@@ -378,6 +404,7 @@ function buildGuideData() {
     preferredImplementation: "node",
     commands: {
       inspect: "crp check --json",
+      init: "crp init --upstream-base-url <URL> --api-key <KEY> --json",
       start: "crp start --upstream-base-url <URL> --api-key <KEY> --json",
       status: "crp status --json",
       stop: "crp stop --json",
@@ -388,13 +415,15 @@ function buildGuideData() {
       "Run check --json first.",
       "Read runtimeStatus and recommendedImplementation.",
       "If node dependencies are ready, use the node path.",
-      "Run start with --upstream-base-url and --api-key, or let the CLI prompt interactively.",
+      "Optionally run init once to save upstream settings under ~/.codex-remote-proxy/.",
+      "Run start. It will resolve settings from CLI flags, then environment variables, then saved config, and only prompt as a last resort.",
       "start launches the proxy in the background by default and patches ~/.codex/config.toml.",
       "Use status --json to confirm the proxy is healthy."
     ],
     notes: [
       "The start command modifies ~/.codex/config.toml and creates a backup.",
-      "The proxy configuration and state are stored under ~/.codex-remote-proxy/."
+      "The proxy configuration and state are stored under ~/.codex-remote-proxy/.",
+      "Use CRP_UPSTREAM_BASE_URL and CRP_UPSTREAM_API_KEY when you want non-interactive start without exposing secrets in later AI interactions."
     ]
   };
 }
@@ -404,6 +433,7 @@ function buildCheckData(options) {
   const codexText = existsSync(codexConfigPath) ? readFileSync(codexConfigPath, "utf8") : "";
   const provider = extractOpenAiSection(codexText);
   const authData = readJson(authPath);
+  const userConfig = loadUserConfig();
   const managedInfo = getManagedServiceInfo();
   const runtimeStatus = { node: detectNodeRuntime() };
 
@@ -422,6 +452,16 @@ function buildCheckData(options) {
       accessTokenLength: typeof authData?.tokens?.access_token === "string" ? authData.tokens.access_token.length : 0
     },
     runtimeStatus,
+    configSources: {
+      savedConfigPath: USER_CONFIG_FILE,
+      savedConfigPresent: Boolean(userConfig.upstreamBaseUrl || userConfig.apiKey),
+      envPresent: {
+        upstreamBaseUrl: Boolean(process.env[ENV_KEYS.upstreamBaseUrl]),
+        apiKey: Boolean(process.env[ENV_KEYS.apiKey]),
+        listenHost: Boolean(process.env[ENV_KEYS.listenHost]),
+        listenPort: Boolean(process.env[ENV_KEYS.listenPort])
+      }
+    },
     implementation: {
       configPath: NODE_RUNTIME_CONFIG_PATH,
       configExists: existsSync(NODE_RUNTIME_CONFIG_PATH),
@@ -456,6 +496,7 @@ function printHumanCheck(data) {
   console.log("");
   console.log(`Global home: ${data.globalHome}`);
   console.log(`Global command: ${data.globalCommand}`);
+  console.log(`Saved config: ${data.configSources.savedConfigPresent ? data.configSources.savedConfigPath : "(not configured)"}`);
 }
 
 function writeProxyConfig(path, config) {
@@ -532,6 +573,49 @@ function patchCodexConfigText(text, proxyUrl) {
   return `${lines.join("\n")}\n`;
 }
 
+function resolveConfigValue({ cliValue, envKey, savedValue, defaultValue = "" }) {
+  if (typeof cliValue === "string" && cliValue.trim()) {
+    return { value: cliValue.trim(), source: "cli" };
+  }
+  if (typeof process.env[envKey] === "string" && process.env[envKey].trim()) {
+    return { value: process.env[envKey].trim(), source: "env" };
+  }
+  if (typeof savedValue === "string" && savedValue.trim()) {
+    return { value: savedValue.trim(), source: "saved" };
+  }
+  if (defaultValue) {
+    return { value: defaultValue, source: "default" };
+  }
+  return { value: "", source: "missing" };
+}
+
+function resolveUserSettings(options) {
+  const saved = loadUserConfig();
+  return {
+    upstreamBaseUrl: resolveConfigValue({
+      cliValue: options["upstream-base-url"],
+      envKey: ENV_KEYS.upstreamBaseUrl,
+      savedValue: saved.upstreamBaseUrl
+    }),
+    apiKey: resolveConfigValue({
+      cliValue: options["api-key"],
+      envKey: ENV_KEYS.apiKey,
+      savedValue: saved.apiKey
+    }),
+    listenHost: resolveConfigValue({
+      cliValue: options["listen-host"],
+      envKey: ENV_KEYS.listenHost,
+      savedValue: saved.listenHost,
+      defaultValue: "127.0.0.1"
+    }),
+    listenPort: resolveConfigValue({
+      cliValue: options["listen-port"],
+      envKey: ENV_KEYS.listenPort,
+      savedValue: saved.listenPort ? String(saved.listenPort) : ""
+    })
+  };
+}
+
 async function installCommand(options) {
   if (options.json && options.debug) {
     throw new Error("--json cannot be combined with --debug");
@@ -542,14 +626,15 @@ async function installCommand(options) {
     throw new Error("Node dependencies are missing. Run `npm install` first.");
   }
 
-  const upstreamBaseUrl = options["upstream-base-url"] || await promptValue("Upstream base URL", "");
-  const apiKey = options["api-key"] || await promptValue("Upstream API key", "");
+  const resolved = resolveUserSettings(options);
+  const upstreamBaseUrl = resolved.upstreamBaseUrl.value || await promptValue("Upstream base URL", "");
+  const apiKey = resolved.apiKey.value || await promptSecret("Upstream API key", "");
   if (!upstreamBaseUrl || !apiKey) {
     throw new Error("Upstream base URL and API key are required");
   }
 
-  const listenHost = options["listen-host"] || "127.0.0.1";
-  const listenPort = options["listen-port"] ? Number.parseInt(options["listen-port"], 10) : await chooseFreePort(listenHost);
+  const listenHost = resolved.listenHost.value || "127.0.0.1";
+  const listenPort = resolved.listenPort.value ? Number.parseInt(resolved.listenPort.value, 10) : await chooseFreePort(listenHost);
   const codexConfigPath = getCommonPaths(options).codexConfigPath;
   const authPath = getCommonPaths(options).authPath;
   const proxyConfigPath = NODE_RUNTIME_CONFIG_PATH;
@@ -630,6 +715,12 @@ async function installCommand(options) {
     upstreamBaseUrl,
     codexConfigPath,
     proxyConfigPath,
+    configSource: {
+      upstreamBaseUrl: resolved.upstreamBaseUrl.source,
+      apiKey: resolved.apiKey.source,
+      listenHost: resolved.listenHost.source,
+      listenPort: resolved.listenPort.source === "missing" ? "auto" : resolved.listenPort.source
+    },
     logFile: managedState.logFile,
     managedStatePath: STATE_FILE,
     health,
@@ -653,6 +744,42 @@ async function installCommand(options) {
 }
 
 const startCommandAction = installCommand;
+
+async function initCommand(options) {
+  const resolved = resolveUserSettings(options);
+  const upstreamBaseUrl = resolved.upstreamBaseUrl.value || await promptValue("Upstream base URL", "");
+  const apiKey = resolved.apiKey.value || await promptSecret("Upstream API key", "");
+  const listenHost = resolved.listenHost.value || "127.0.0.1";
+  const listenPort = resolved.listenPort.value ? Number.parseInt(resolved.listenPort.value, 10) : undefined;
+
+  if (!upstreamBaseUrl || !apiKey) {
+    throw new Error("Upstream base URL and API key are required");
+  }
+
+  writeUserConfig({
+    upstreamBaseUrl,
+    apiKey,
+    listenHost,
+    listenPort
+  });
+
+  const payload = {
+    ok: true,
+    configPath: USER_CONFIG_FILE,
+    saved: {
+      upstreamBaseUrl,
+      apiKeyPreview: maskSecret(apiKey),
+      listenHost,
+      listenPort: listenPort ?? null
+    }
+  };
+
+  if (!maybePrintJson(options, payload)) {
+    console.log("Saved CRP configuration.");
+    console.log(`Config path: ${USER_CONFIG_FILE}`);
+    console.log("You can now run: crp start");
+  }
+}
 
 function checkCommand(options) {
   const data = buildCheckData(options);
@@ -734,6 +861,7 @@ async function installCliCommand(options) {
 async function main() {
   const { command, options } = parseCommandLine(process.argv.slice(2));
   if (command === "check") return checkCommand(options);
+  if (command === "init") return await initCommand(options);
   if (command === "guide") return guideCommand(options);
   if (command === "start" || command === "install" || command === "setup") return await startCommandAction(options);
   if (command === "status") return await statusCommand(options);
