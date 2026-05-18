@@ -18,6 +18,7 @@ const LOG_FILE = resolve(GLOBAL_HOME, "proxy.log");
 const USER_CONFIG_FILE = resolve(GLOBAL_HOME, "config.json");
 const NODE_RUNTIME_CONFIG_PATH = resolve(GLOBAL_HOME, "node", "proxy-config.json");
 const OPENAI_SECTION_HEADER = "[model_providers.OpenAI]";
+const CRP_SECTION_HEADER = "[codex_remote_proxy]";
 const ENV_KEYS = {
   upstreamBaseUrl: "CRP_UPSTREAM_BASE_URL",
   apiKey: "CRP_UPSTREAM_API_KEY",
@@ -141,9 +142,9 @@ function parseTomlScalar(rawValue) {
   return rawValue;
 }
 
-function extractOpenAiSection(text) {
+function extractTomlSection(text, sectionHeader) {
   const lines = splitLines(text);
-  const range = findSectionRange(lines, OPENAI_SECTION_HEADER);
+  const range = findSectionRange(lines, sectionHeader);
   const result = {};
   if (!range) {
     return result;
@@ -158,6 +159,22 @@ function extractOpenAiSection(text) {
     result[key] = parseTomlScalar(rawValue);
   }
   return result;
+}
+
+function extractOpenAiSection(text) {
+  return extractTomlSection(text, OPENAI_SECTION_HEADER);
+}
+
+function extractCodexRemoteProxySection(text) {
+  return extractTomlSection(text, CRP_SECTION_HEADER);
+}
+
+function getCodexRemoteProxyUpstreamBaseUrl(section) {
+  return section.upstream_base_url ?? section.base_url ?? null;
+}
+
+function getCodexRemoteProxyUpstreamApiKey(section) {
+  return section.upstream_api_key ?? section.api_key ?? null;
 }
 
 function detectNodeRuntime() {
@@ -415,15 +432,16 @@ function buildGuideData() {
       "Run check --json first.",
       "Read runtimeStatus and recommendedImplementation.",
       "If node dependencies are ready, use the node path.",
-      "Optionally run init once to save upstream settings under ~/.codex-remote-proxy/.",
-      "Run start. It will resolve settings from CLI flags, then environment variables, then saved config, and only prompt as a last resort.",
+      "Optionally set [codex_remote_proxy] in ~/.codex/config.toml or run init once to save upstream settings under ~/.codex-remote-proxy/.",
+      "Run start. It will resolve settings from CLI flags, then environment variables, then ~/.codex/config.toml [codex_remote_proxy], then saved config, and only prompt as a last resort.",
       "start launches the proxy in the background by default and patches ~/.codex/config.toml.",
       "Use status --json to confirm the proxy is healthy."
     ],
     notes: [
       "The start command modifies ~/.codex/config.toml and creates a backup.",
       "The proxy configuration and state are stored under ~/.codex-remote-proxy/.",
-      "Use CRP_UPSTREAM_BASE_URL and CRP_UPSTREAM_API_KEY when you want non-interactive start without exposing secrets in later AI interactions."
+      "Use CRP_UPSTREAM_BASE_URL and CRP_UPSTREAM_API_KEY when you want non-interactive start without exposing secrets in later AI interactions.",
+      "The optional ~/.codex/config.toml [codex_remote_proxy] section supports upstream_base_url and upstream_api_key as another non-interactive source."
     ]
   };
 }
@@ -432,6 +450,9 @@ function buildCheckData(options) {
   const { codexConfigPath, authPath } = getCommonPaths(options);
   const codexText = existsSync(codexConfigPath) ? readFileSync(codexConfigPath, "utf8") : "";
   const provider = extractOpenAiSection(codexText);
+  const codexRemoteProxy = extractCodexRemoteProxySection(codexText);
+  const codexRemoteProxyUpstreamBaseUrl = getCodexRemoteProxyUpstreamBaseUrl(codexRemoteProxy);
+  const codexRemoteProxyUpstreamApiKey = getCodexRemoteProxyUpstreamApiKey(codexRemoteProxy);
   const authData = readJson(authPath);
   const userConfig = loadUserConfig();
   const managedInfo = getManagedServiceInfo();
@@ -445,6 +466,10 @@ function buildCheckData(options) {
       wireApi: provider.wire_api ?? null,
       requiresOpenAiAuth: provider.requires_openai_auth ?? null
     },
+    codexRemoteProxy: {
+      upstreamBaseUrl: codexRemoteProxyUpstreamBaseUrl,
+      upstreamApiKeyPreview: typeof codexRemoteProxyUpstreamApiKey === "string" ? maskSecret(codexRemoteProxyUpstreamApiKey) : null
+    },
     auth: {
       authMode: authData.auth_mode ?? null,
       openAiApiKeyPreview: typeof authData.OPENAI_API_KEY === "string" ? maskSecret(authData.OPENAI_API_KEY) : null,
@@ -453,6 +478,7 @@ function buildCheckData(options) {
     },
     runtimeStatus,
     configSources: {
+      codexConfigSectionPresent: Boolean(codexRemoteProxyUpstreamBaseUrl || codexRemoteProxyUpstreamApiKey),
       savedConfigPath: USER_CONFIG_FILE,
       savedConfigPresent: Boolean(userConfig.upstreamBaseUrl || userConfig.apiKey),
       envPresent: {
@@ -488,6 +514,10 @@ function printHumanCheck(data) {
   console.log(`  wire_api: ${data.codexOpenAiProvider.wireApi || "(missing)"}`);
   console.log(`  requires_openai_auth: ${data.codexOpenAiProvider.requiresOpenAiAuth ?? "(missing)"}`);
   console.log("");
+  console.log("Codex [codex_remote_proxy]:");
+  console.log(`  upstream_base_url: ${data.codexRemoteProxy.upstreamBaseUrl || "(missing)"}`);
+  console.log(`  upstream_api_key: ${data.codexRemoteProxy.upstreamApiKeyPreview || "(missing)"}`);
+  console.log("");
   console.log("Runtime status:");
   console.log(`  node: ${data.runtimeStatus.node.available ? data.runtimeStatus.node.version : data.runtimeStatus.node.error}`);
   if (data.runtimeStatus.node.available && !data.runtimeStatus.node.dependenciesReady) {
@@ -496,6 +526,7 @@ function printHumanCheck(data) {
   console.log("");
   console.log(`Global home: ${data.globalHome}`);
   console.log(`Global command: ${data.globalCommand}`);
+  console.log(`Codex proxy section: ${data.configSources.codexConfigSectionPresent ? data.codexConfigPath : "(not configured)"}`);
   console.log(`Saved config: ${data.configSources.savedConfigPresent ? data.configSources.savedConfigPath : "(not configured)"}`);
 }
 
@@ -573,15 +604,17 @@ function patchCodexConfigText(text, proxyUrl) {
   return `${lines.join("\n")}\n`;
 }
 
-function resolveConfigValue({ cliValue, envKey, savedValue, defaultValue = "" }) {
+function resolveConfigValue({ cliValue, envKey, savedValues = [], defaultValue = "" }) {
   if (typeof cliValue === "string" && cliValue.trim()) {
     return { value: cliValue.trim(), source: "cli" };
   }
   if (typeof process.env[envKey] === "string" && process.env[envKey].trim()) {
     return { value: process.env[envKey].trim(), source: "env" };
   }
-  if (typeof savedValue === "string" && savedValue.trim()) {
-    return { value: savedValue.trim(), source: "saved" };
+  for (const savedValue of savedValues) {
+    if (typeof savedValue?.value === "string" && savedValue.value.trim()) {
+      return { value: savedValue.value.trim(), source: savedValue.source || "saved" };
+    }
   }
   if (defaultValue) {
     return { value: defaultValue, source: "default" };
@@ -591,27 +624,42 @@ function resolveConfigValue({ cliValue, envKey, savedValue, defaultValue = "" })
 
 function resolveUserSettings(options) {
   const saved = loadUserConfig();
+  const { codexConfigPath } = getCommonPaths(options);
+  const codexText = existsSync(codexConfigPath) ? readFileSync(codexConfigPath, "utf8") : "";
+  const codexRemoteProxy = extractCodexRemoteProxySection(codexText);
+  const codexRemoteProxyUpstreamBaseUrl = getCodexRemoteProxyUpstreamBaseUrl(codexRemoteProxy);
+  const codexRemoteProxyUpstreamApiKey = getCodexRemoteProxyUpstreamApiKey(codexRemoteProxy);
   return {
     upstreamBaseUrl: resolveConfigValue({
       cliValue: options["upstream-base-url"],
       envKey: ENV_KEYS.upstreamBaseUrl,
-      savedValue: saved.upstreamBaseUrl
+      savedValues: [
+        { value: codexRemoteProxyUpstreamBaseUrl, source: "codex_config" },
+        { value: saved.upstreamBaseUrl, source: "saved" }
+      ]
     }),
     apiKey: resolveConfigValue({
       cliValue: options["api-key"],
       envKey: ENV_KEYS.apiKey,
-      savedValue: saved.apiKey
+      savedValues: [
+        { value: codexRemoteProxyUpstreamApiKey, source: "codex_config" },
+        { value: saved.apiKey, source: "saved" }
+      ]
     }),
     listenHost: resolveConfigValue({
       cliValue: options["listen-host"],
       envKey: ENV_KEYS.listenHost,
-      savedValue: saved.listenHost,
+      savedValues: [
+        { value: saved.listenHost, source: "saved" }
+      ],
       defaultValue: "127.0.0.1"
     }),
     listenPort: resolveConfigValue({
       cliValue: options["listen-port"],
       envKey: ENV_KEYS.listenPort,
-      savedValue: saved.listenPort ? String(saved.listenPort) : ""
+      savedValues: [
+        { value: saved.listenPort ? String(saved.listenPort) : "", source: "saved" }
+      ]
     })
   };
 }

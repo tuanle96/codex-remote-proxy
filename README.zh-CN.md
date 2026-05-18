@@ -82,9 +82,25 @@ CLI 统一管理目录：
 
 你不必每次都把 `base_url` 和 `api_key` 再传给 `crp start`。
 
-推荐两种方式：
+推荐三种方式：
 
-### 方式 1：本地保存一次
+### 方式 1：写进 `~/.codex/config.toml`
+
+可以额外加一段：
+
+```toml
+[codex_remote_proxy]
+upstream_base_url = "https://your-upstream.example.com"
+upstream_api_key = "sk-your-key"
+```
+
+之后直接执行：
+
+```bash
+crp start
+```
+
+### 方式 2：本地保存一次
 
 ```bash
 crp init
@@ -103,7 +119,7 @@ crp start
 crp start
 ```
 
-### 方式 2：使用环境变量
+### 方式 3：使用环境变量
 
 ```bash
 export CRP_UPSTREAM_BASE_URL="https://your-upstream.example.com"
@@ -115,8 +131,9 @@ crp start
 
 1. CLI 参数
 2. 环境变量
-3. `crp init` 保存的本地配置
-4. 交互式输入
+3. `~/.codex/config.toml` 里的 `[codex_remote_proxy]`，键名使用 `upstream_base_url` 和 `upstream_api_key`
+4. `crp init` 保存的本地配置
+5. 交互式输入
 
 ## 全局 CLI
 
@@ -126,10 +143,10 @@ crp start
   查看 Codex 配置、鉴权模式、运行时状态和托管服务状态
 
 - `crp start`
-  提示输入或接收 `base_url` / `api_key`，自动选择空闲端口，修改 Codex 配置，并默认后台启动代理
+  从 CLI 参数、环境变量、`~/.codex/config.toml` 的 `[codex_remote_proxy]` 或交互输入中获取上游配置，自动选择空闲端口，修改 Codex 配置，并默认后台启动代理
 
 - `crp init`
-  先把上游配置安全保存到 `~/.codex-remote-proxy/`，以后 `crp start` 不需要再重复输入密钥
+  先把上游配置安全保存到 `~/.codex-remote-proxy/`，如果你不想把密钥写进 `~/.codex/config.toml`，以后 `crp start` 也不需要再重复输入
 
 - `crp install`
   与 `crp start` 等价的兼容别名
@@ -158,7 +175,7 @@ crp status --json
 1. 先跑 `crp check --json`
 2. 读取 `recommendedImplementation`
 3. 如果 Node 依赖就绪，优先走 `node`
-4. 让用户先在本地跑一次 `crp init`，或者提前在系统里设置好环境变量
+4. 优先使用现有 `~/.codex/config.toml` 里的 `[codex_remote_proxy]`，并使用 `upstream_base_url` / `upstream_api_key` 这两个键，否则让用户先在本地跑一次 `crp init`，或者提前在系统里设置好环境变量
 5. 再跑 `crp start`
 6. 从返回结果中读取 `proxyUrl`、`pid`、`health`
 7. 之后用 `crp status --json` 做确认
@@ -169,7 +186,7 @@ crp status --json
 - `install` 会先创建备份
 - 托管状态和日志保存在 `~/.codex-remote-proxy/`
 - 如果你是直接从当前仓库运行，需要先执行 `cd node && npm install`
-- `crp init` 或环境变量模式可以避免后续 AI 直接接触密钥
+- `~/.codex/config.toml`、`crp init` 或环境变量模式都可以避免后续 AI 直接接触密钥
 
 ## 实现目录
 

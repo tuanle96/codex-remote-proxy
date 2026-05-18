@@ -88,7 +88,23 @@ You do not have to pass `base_url` and `api_key` to `crp start` every time.
 
 Recommended options:
 
-### Option 1: Save once locally
+### Option 1: Save in `~/.codex/config.toml`
+
+Add an optional section like:
+
+```toml
+[codex_remote_proxy]
+upstream_base_url = "https://your-upstream.example.com"
+upstream_api_key = "sk-your-key"
+```
+
+Then later runs only need:
+
+```bash
+crp start
+```
+
+### Option 2: Save once locally with `crp init`
 
 ```bash
 crp init
@@ -107,7 +123,7 @@ After that, later runs only need:
 crp start
 ```
 
-### Option 2: Use environment variables
+### Option 3: Use environment variables
 
 ```bash
 export CRP_UPSTREAM_BASE_URL="https://your-upstream.example.com"
@@ -119,8 +135,9 @@ crp start
 
 1. CLI flags
 2. Environment variables
-3. Saved config from `crp init`
-4. Interactive prompts
+3. `~/.codex/config.toml` under `[codex_remote_proxy]` using `upstream_base_url` and `upstream_api_key`
+4. Saved config from `crp init`
+5. Interactive prompts
 
 ## Global CLI
 
@@ -130,10 +147,10 @@ Main commands:
   Inspect Codex config, auth mode, runtime availability, and managed service state
 
 - `crp start`
-  Prompt for or accept `base_url` and `api_key`, choose a free port, patch Codex, and start the proxy in the background by default
+  Accept upstream settings from CLI flags, environment variables, `~/.codex/config.toml` `[codex_remote_proxy]`, or prompts; choose a free port, patch Codex, and start the proxy in the background by default
 
 - `crp init`
-  Save upstream settings once under `~/.codex-remote-proxy/` so later `crp start` calls do not require secrets again
+  Save upstream settings once under `~/.codex-remote-proxy/` so later `crp start` calls do not require secrets again if you do not want to place them in `~/.codex/config.toml`
 
 - `crp install`
   Compatibility alias for `crp start`
@@ -162,7 +179,7 @@ Recommended flow:
 1. Run `crp check --json`
 2. Read `recommendedImplementation`
 3. If Node dependencies are ready, prefer `node`
-4. Ask the user to run `crp init` once locally, or rely on environment variables already set outside the AI session
+4. Prefer existing `~/.codex/config.toml` `[codex_remote_proxy]` with `upstream_base_url` and `upstream_api_key`, otherwise ask the user to run `crp init` once locally, or rely on environment variables already set outside the AI session
 5. Run `crp start`
 6. Read `proxyUrl`, `pid`, and `health` from the JSON result
 7. Use `crp status --json` for later verification
@@ -173,7 +190,7 @@ Notes:
 - the managed proxy runs in the background by default
 - managed state and logs live under `~/.codex-remote-proxy/`
 - when running directly from this repository, install Node dependencies first
-- `crp init` or environment variables can keep secrets out of later AI interactions
+- `~/.codex/config.toml`, `crp init`, or environment variables can keep secrets out of later AI interactions
 
 ## Implementations
 
