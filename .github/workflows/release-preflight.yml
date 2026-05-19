@@ -41,7 +41,7 @@ jobs:
       - name: Detect changeset files
         id: changesets
         run: |
-          if find .changeset -name "*.md" ! -name "README.md" | grep -q .; then
+          if git diff --name-only origin/main...HEAD | grep -E '^node/\.changeset/.*\.md$' | grep -v 'README.md' >/dev/null; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
