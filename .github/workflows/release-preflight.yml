@@ -1,0 +1,52 @@
+name: Release Preflight
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-preflight.yml"
+      - "node/package.json"
+      - "node/package-lock.json"
+      - "node/.changeset/**"
+      - "node/RELEASING.md"
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: node/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests if present
+        run: npm run test --if-present
+
+      - name: Detect changeset files
+        id: changesets
+        run: |
+          if git diff --name-only origin/main...HEAD | grep -E '^node/\.changeset/.*\.md$' | grep -v 'README.md' >/dev/null; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate changeset state
+        if: steps.changesets.outputs.present == 'true'
+        run: npm run changeset -- status --since=origin/main
