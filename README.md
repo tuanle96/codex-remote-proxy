@@ -96,6 +96,8 @@ Add an optional section like:
 [codex_remote_proxy]
 upstream_base_url = "https://your-upstream.example.com"
 upstream_api_key = "sk-your-key"
+capture_enabled = true
+capture_db_path = "/Users/you/.codex-remote-proxy/traffic.sqlite3"
 ```
 
 Then later runs only need:
@@ -128,6 +130,8 @@ crp start
 ```bash
 export CRP_UPSTREAM_BASE_URL="https://your-upstream.example.com"
 export CRP_UPSTREAM_API_KEY="sk-your-key"
+export CRP_CAPTURE_ENABLED="true"
+export CRP_CAPTURE_DB_PATH="/Users/you/.codex-remote-proxy/traffic.sqlite3"
 crp start
 ```
 
@@ -135,9 +139,48 @@ crp start
 
 1. CLI flags
 2. Environment variables
-3. `~/.codex/config.toml` under `[codex_remote_proxy]` using `upstream_base_url` and `upstream_api_key`
+3. `~/.codex/config.toml` under `[codex_remote_proxy]` using `upstream_base_url`, `upstream_api_key`, `capture_enabled`, and `capture_db_path`
 4. Saved config from `crp init`
 5. Interactive prompts
+
+## Request Capture
+
+Request capture is optional and disabled by default.
+
+When enabled, the proxy stores one SQLite row per proxied HTTP transaction under:
+
+```text
+~/.codex-remote-proxy/traffic.sqlite3
+```
+
+or a custom path you provide with `capture_db_path`.
+
+What is stored:
+
+- full request headers after proxy rewrites
+- full request body
+- full response headers
+- full response body
+- SSE responses aggregated into one stored body
+
+Sensitive headers such as `Authorization`, `Cookie`, `Set-Cookie`, and token-like header names are redacted before writing.
+
+Enable capture at startup:
+
+```bash
+crp start --capture
+crp start --capture --capture-db-path /Users/you/.codex-remote-proxy/custom-traffic.sqlite3
+```
+
+Hot-toggle capture on a running managed proxy:
+
+```bash
+crp capture on
+crp capture off
+crp capture status --json
+```
+
+You can also edit `~/.codex-remote-proxy/node/proxy-config.json` directly. Changes to `capture.enabled` hot-apply after the proxy validates the SQLite connection. Changes to `capture.dbPath` are detected, but require a restart before the new path is used.
 
 ## Global CLI
 
@@ -150,10 +193,13 @@ Main commands:
   Accept upstream settings from CLI flags, environment variables, `~/.codex/config.toml` `[codex_remote_proxy]`, or prompts; choose a free port, patch Codex, and start the proxy in the background by default
 
 - `crp init`
-  Save upstream settings once under `~/.codex-remote-proxy/` so later `crp start` calls do not require secrets again if you do not want to place them in `~/.codex/config.toml`
+  Save upstream settings and optional capture defaults once under `~/.codex-remote-proxy/` so later `crp start` calls do not require secrets again if you do not want to place them in `~/.codex/config.toml`
 
 - `crp install`
   Compatibility alias for `crp start`
+
+- `crp capture on|off|status`
+  Toggle SQLite request capture on a running managed proxy, or persist the preference for the next start if the proxy is not running
 
 - `crp status`
   Show managed service status and health. If the proxy is running but not managed by this CLI, it will try to detect that too
@@ -168,6 +214,7 @@ Machine-readable examples:
 
 ```bash
 crp check --json
+crp capture status --json
 crp guide --json
 crp status --json
 ```
@@ -179,7 +226,7 @@ Recommended flow:
 1. Run `crp check --json`
 2. Read `recommendedImplementation`
 3. If Node dependencies are ready, prefer `node`
-4. Prefer existing `~/.codex/config.toml` `[codex_remote_proxy]` with `upstream_base_url` and `upstream_api_key`, otherwise ask the user to run `crp init` once locally, or rely on environment variables already set outside the AI session
+4. Prefer existing `~/.codex/config.toml` `[codex_remote_proxy]` with `upstream_base_url`, `upstream_api_key`, `capture_enabled`, and `capture_db_path`, otherwise ask the user to run `crp init` once locally, or rely on environment variables already set outside the AI session
 5. Run `crp start`
 6. Read `proxyUrl`, `pid`, and `health` from the JSON result
 7. Use `crp status --json` for later verification
@@ -189,6 +236,7 @@ Notes:
 - `start` modifies `~/.codex/config.toml` and creates a backup
 - the managed proxy runs in the background by default
 - managed state and logs live under `~/.codex-remote-proxy/`
+- request capture writes to SQLite only when enabled
 - when running directly from this repository, install Node dependencies first
 - `~/.codex/config.toml`, `crp init`, or environment variables can keep secrets out of later AI interactions
 

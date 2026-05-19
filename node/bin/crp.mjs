@@ -7,6 +7,8 @@ import readline from "node:readline/promises";
 import os from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { DEFAULT_CAPTURE_DB_PATH } from "../src/capture-store.mjs";
+
 const PACKAGE_ROOT = resolve(import.meta.dirname, "..");
 const DEFAULT_CODEX_CONFIG_PATH = resolve(os.homedir(), ".codex", "config.toml");
 const DEFAULT_AUTH_PATH = resolve(os.homedir(), ".codex", "auth.json");
@@ -23,7 +25,9 @@ const ENV_KEYS = {
   upstreamBaseUrl: "CRP_UPSTREAM_BASE_URL",
   apiKey: "CRP_UPSTREAM_API_KEY",
   listenHost: "CRP_LISTEN_HOST",
-  listenPort: "CRP_LISTEN_PORT"
+  listenPort: "CRP_LISTEN_PORT",
+  captureEnabled: "CRP_CAPTURE_ENABLED",
+  captureDbPath: "CRP_CAPTURE_DB_PATH"
 };
 
 function parseCommandLine(argv) {
@@ -56,9 +60,10 @@ function parseCommandLine(argv) {
 function printHelp() {
   console.log("Usage:");
   console.log("  crp check [--json] [--codex-config PATH] [--auth PATH]");
-  console.log("  crp init [--json] [--upstream-base-url URL] [--api-key KEY] [--listen-host 127.0.0.1] [--listen-port PORT]");
-  console.log("  crp start [--json] [--upstream-base-url URL] [--api-key KEY] [--listen-host 127.0.0.1] [--listen-port PORT] [--debug]");
+  console.log("  crp init [--json] [--upstream-base-url URL] [--api-key KEY] [--listen-host 127.0.0.1] [--listen-port PORT] [--capture] [--no-capture] [--capture-db-path PATH]");
+  console.log("  crp start [--json] [--upstream-base-url URL] [--api-key KEY] [--listen-host 127.0.0.1] [--listen-port PORT] [--capture] [--no-capture] [--capture-db-path PATH] [--debug]");
   console.log("  crp install [same as start]");
+  console.log("  crp capture <on|off|status> [--json]");
   console.log("  crp status [--json]");
   console.log("  crp stop [--json]");
   console.log("  crp setup [same as start]");
@@ -100,6 +105,23 @@ function writeUserConfig(config) {
   } catch {
     // Best effort only.
   }
+}
+
+function applyUserConfigPatch(patch) {
+  const current = loadUserConfig();
+  const next = {
+    ...current,
+    ...patch
+  };
+  writeUserConfig(next);
+  return next;
+}
+
+function loadRuntimeProxyConfig() {
+  if (!existsSync(NODE_RUNTIME_CONFIG_PATH)) {
+    return null;
+  }
+  return readJson(NODE_RUNTIME_CONFIG_PATH);
 }
 
 function splitLines(text) {
@@ -175,6 +197,35 @@ function getCodexRemoteProxyUpstreamBaseUrl(section) {
 
 function getCodexRemoteProxyUpstreamApiKey(section) {
   return section.upstream_api_key ?? section.api_key ?? null;
+}
+
+function getCodexRemoteProxyCaptureEnabled(section) {
+  return typeof section.capture_enabled === "boolean" ? section.capture_enabled : null;
+}
+
+function getCodexRemoteProxyCaptureDbPath(section) {
+  return section.capture_db_path ?? null;
+}
+
+function normalizeBooleanInput(value, fallback = null) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return fallback;
+  }
+  const lowered = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(lowered)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(lowered)) {
+    return false;
+  }
+  return fallback;
+}
+
+function ensureCaptureDbPath(path) {
+  return typeof path === "string" && path.trim() ? path.trim() : DEFAULT_CAPTURE_DB_PATH;
 }
 
 function detectNodeRuntime() {
@@ -421,8 +472,11 @@ function buildGuideData() {
     preferredImplementation: "node",
     commands: {
       inspect: "crp check --json",
-      init: "crp init --upstream-base-url <URL> --api-key <KEY> --json",
-      start: "crp start --upstream-base-url <URL> --api-key <KEY> --json",
+      init: "crp init --upstream-base-url <URL> --api-key <KEY> [--capture] [--capture-db-path PATH] --json",
+      start: "crp start --upstream-base-url <URL> --api-key <KEY> [--capture] [--capture-db-path PATH] --json",
+      captureOn: "crp capture on --json",
+      captureOff: "crp capture off --json",
+      captureStatus: "crp capture status --json",
       status: "crp status --json",
       stop: "crp stop --json",
       installCli: "npm install -g @cluic/codex-remote-proxy",
@@ -434,6 +488,7 @@ function buildGuideData() {
       "If node dependencies are ready, use the node path.",
       "Optionally set [codex_remote_proxy] in ~/.codex/config.toml or run init once to save upstream settings under ~/.codex-remote-proxy/.",
       "Run start. It will resolve settings from CLI flags, then environment variables, then ~/.codex/config.toml [codex_remote_proxy], then saved config, and only prompt as a last resort.",
+      "Use `crp capture on|off` for runtime capture toggling; manual edits to the runtime proxy config also hot-apply capture.enabled.",
       "start launches the proxy in the background by default and patches ~/.codex/config.toml.",
       "Use status --json to confirm the proxy is healthy."
     ],
@@ -441,7 +496,7 @@ function buildGuideData() {
       "The start command modifies ~/.codex/config.toml and creates a backup.",
       "The proxy configuration and state are stored under ~/.codex-remote-proxy/.",
       "Use CRP_UPSTREAM_BASE_URL and CRP_UPSTREAM_API_KEY when you want non-interactive start without exposing secrets in later AI interactions.",
-      "The optional ~/.codex/config.toml [codex_remote_proxy] section supports upstream_base_url and upstream_api_key as another non-interactive source."
+      "The optional ~/.codex/config.toml [codex_remote_proxy] section supports upstream_base_url, upstream_api_key, capture_enabled, and capture_db_path as non-interactive sources."
     ]
   };
 }
@@ -453,8 +508,11 @@ function buildCheckData(options) {
   const codexRemoteProxy = extractCodexRemoteProxySection(codexText);
   const codexRemoteProxyUpstreamBaseUrl = getCodexRemoteProxyUpstreamBaseUrl(codexRemoteProxy);
   const codexRemoteProxyUpstreamApiKey = getCodexRemoteProxyUpstreamApiKey(codexRemoteProxy);
+  const codexRemoteProxyCaptureEnabled = getCodexRemoteProxyCaptureEnabled(codexRemoteProxy);
+  const codexRemoteProxyCaptureDbPath = getCodexRemoteProxyCaptureDbPath(codexRemoteProxy);
   const authData = readJson(authPath);
   const userConfig = loadUserConfig();
+  const runtimeProxyConfig = loadRuntimeProxyConfig();
   const managedInfo = getManagedServiceInfo();
   const runtimeStatus = { node: detectNodeRuntime() };
 
@@ -468,7 +526,9 @@ function buildCheckData(options) {
     },
     codexRemoteProxy: {
       upstreamBaseUrl: codexRemoteProxyUpstreamBaseUrl,
-      upstreamApiKeyPreview: typeof codexRemoteProxyUpstreamApiKey === "string" ? maskSecret(codexRemoteProxyUpstreamApiKey) : null
+      upstreamApiKeyPreview: typeof codexRemoteProxyUpstreamApiKey === "string" ? maskSecret(codexRemoteProxyUpstreamApiKey) : null,
+      captureEnabled: codexRemoteProxyCaptureEnabled,
+      captureDbPath: codexRemoteProxyCaptureDbPath
     },
     auth: {
       authMode: authData.auth_mode ?? null,
@@ -485,12 +545,15 @@ function buildCheckData(options) {
         upstreamBaseUrl: Boolean(process.env[ENV_KEYS.upstreamBaseUrl]),
         apiKey: Boolean(process.env[ENV_KEYS.apiKey]),
         listenHost: Boolean(process.env[ENV_KEYS.listenHost]),
-        listenPort: Boolean(process.env[ENV_KEYS.listenPort])
+        listenPort: Boolean(process.env[ENV_KEYS.listenPort]),
+        captureEnabled: Boolean(process.env[ENV_KEYS.captureEnabled]),
+        captureDbPath: Boolean(process.env[ENV_KEYS.captureDbPath])
       }
     },
     implementation: {
       configPath: NODE_RUNTIME_CONFIG_PATH,
       configExists: existsSync(NODE_RUNTIME_CONFIG_PATH),
+      runtimeConfig: runtimeProxyConfig,
       startCommand: startCommand(NODE_RUNTIME_CONFIG_PATH)
     },
     recommendedImplementation: "node",
@@ -517,6 +580,8 @@ function printHumanCheck(data) {
   console.log("Codex [codex_remote_proxy]:");
   console.log(`  upstream_base_url: ${data.codexRemoteProxy.upstreamBaseUrl || "(missing)"}`);
   console.log(`  upstream_api_key: ${data.codexRemoteProxy.upstreamApiKeyPreview || "(missing)"}`);
+  console.log(`  capture_enabled: ${data.codexRemoteProxy.captureEnabled ?? "(missing)"}`);
+  console.log(`  capture_db_path: ${data.codexRemoteProxy.captureDbPath || "(missing)"}`);
   console.log("");
   console.log("Runtime status:");
   console.log(`  node: ${data.runtimeStatus.node.available ? data.runtimeStatus.node.version : data.runtimeStatus.node.error}`);
@@ -629,6 +694,8 @@ function resolveUserSettings(options) {
   const codexRemoteProxy = extractCodexRemoteProxySection(codexText);
   const codexRemoteProxyUpstreamBaseUrl = getCodexRemoteProxyUpstreamBaseUrl(codexRemoteProxy);
   const codexRemoteProxyUpstreamApiKey = getCodexRemoteProxyUpstreamApiKey(codexRemoteProxy);
+  const codexRemoteProxyCaptureEnabled = getCodexRemoteProxyCaptureEnabled(codexRemoteProxy);
+  const codexRemoteProxyCaptureDbPath = getCodexRemoteProxyCaptureDbPath(codexRemoteProxy);
   return {
     upstreamBaseUrl: resolveConfigValue({
       cliValue: options["upstream-base-url"],
@@ -660,6 +727,34 @@ function resolveUserSettings(options) {
       savedValues: [
         { value: saved.listenPort ? String(saved.listenPort) : "", source: "saved" }
       ]
+    }),
+    captureEnabled: (() => {
+      if (options.capture === true) {
+        return { value: true, source: "cli" };
+      }
+      if (options["no-capture"] === true) {
+        return { value: false, source: "cli" };
+      }
+      const envValue = normalizeBooleanInput(process.env[ENV_KEYS.captureEnabled], null);
+      if (envValue !== null) {
+        return { value: envValue, source: "env" };
+      }
+      if (typeof codexRemoteProxyCaptureEnabled === "boolean") {
+        return { value: codexRemoteProxyCaptureEnabled, source: "codex_config" };
+      }
+      if (typeof saved.captureEnabled === "boolean") {
+        return { value: saved.captureEnabled, source: "saved" };
+      }
+      return { value: false, source: "default" };
+    })(),
+    captureDbPath: resolveConfigValue({
+      cliValue: options["capture-db-path"],
+      envKey: ENV_KEYS.captureDbPath,
+      savedValues: [
+        { value: codexRemoteProxyCaptureDbPath, source: "codex_config" },
+        { value: saved.captureDbPath, source: "saved" }
+      ],
+      defaultValue: DEFAULT_CAPTURE_DB_PATH
     })
   };
 }
@@ -687,6 +782,8 @@ async function installCommand(options) {
   const authPath = getCommonPaths(options).authPath;
   const proxyConfigPath = NODE_RUNTIME_CONFIG_PATH;
   const proxyUrl = `http://${listenHost}:${listenPort}`;
+  const captureEnabled = Boolean(resolved.captureEnabled.value);
+  const captureDbPath = ensureCaptureDbPath(resolved.captureDbPath.value);
 
   const proxyConfig = {
     server: { host: listenHost, port: listenPort, logLevel: "info" },
@@ -702,6 +799,10 @@ async function installCommand(options) {
     proxy: {
       overrideAuthorization: true,
       requestIdHeader: "x-client-request-id"
+    },
+    capture: {
+      enabled: captureEnabled,
+      dbPath: captureDbPath
     }
   };
 
@@ -767,11 +868,21 @@ async function installCommand(options) {
       upstreamBaseUrl: resolved.upstreamBaseUrl.source,
       apiKey: resolved.apiKey.source,
       listenHost: resolved.listenHost.source,
-      listenPort: resolved.listenPort.source === "missing" ? "auto" : resolved.listenPort.source
+      listenPort: resolved.listenPort.source === "missing" ? "auto" : resolved.listenPort.source,
+      captureEnabled: resolved.captureEnabled.source,
+      captureDbPath: resolved.captureDbPath.source
     },
     logFile: managedState.logFile,
     managedStatePath: STATE_FILE,
     health,
+    captureConfigured: health.captureConfigured ?? captureEnabled,
+    captureActive: health.captureActive ?? false,
+    captureDbPath: health.captureDbPath ?? captureDbPath,
+    captureState: health.captureState ?? (captureEnabled ? "enabled" : "disabled"),
+    captureRestartRequired: health.captureRestartRequired ?? false,
+    failedWriteCount: health.failedWriteCount ?? 0,
+    lastWriteErrorAt: health.lastWriteErrorAt ?? null,
+    lastWriteErrorMessage: health.lastWriteErrorMessage ?? null,
     message: "Proxy configured and started"
   };
 
@@ -799,6 +910,8 @@ async function initCommand(options) {
   const apiKey = resolved.apiKey.value || await promptSecret("Upstream API key", "");
   const listenHost = resolved.listenHost.value || "127.0.0.1";
   const listenPort = resolved.listenPort.value ? Number.parseInt(resolved.listenPort.value, 10) : undefined;
+  const captureEnabled = Boolean(resolved.captureEnabled.value);
+  const captureDbPath = ensureCaptureDbPath(resolved.captureDbPath.value);
 
   if (!upstreamBaseUrl || !apiKey) {
     throw new Error("Upstream base URL and API key are required");
@@ -808,7 +921,9 @@ async function initCommand(options) {
     upstreamBaseUrl,
     apiKey,
     listenHost,
-    listenPort
+    listenPort,
+    captureEnabled,
+    captureDbPath
   });
 
   const payload = {
@@ -818,7 +933,9 @@ async function initCommand(options) {
       upstreamBaseUrl,
       apiKeyPreview: maskSecret(apiKey),
       listenHost,
-      listenPort: listenPort ?? null
+      listenPort: listenPort ?? null,
+      captureEnabled,
+      captureDbPath
     }
   };
 
@@ -860,6 +977,14 @@ async function statusCommand(options) {
   if (state?.proxyUrl && alive) {
     try {
       payload.health = await waitForHealthyProxy(state.proxyUrl, 2000);
+      payload.captureConfigured = payload.health.captureConfigured ?? null;
+      payload.captureActive = payload.health.captureActive ?? null;
+      payload.captureDbPath = payload.health.captureDbPath ?? null;
+      payload.captureState = payload.health.captureState ?? null;
+      payload.captureRestartRequired = payload.health.captureRestartRequired ?? null;
+      payload.failedWriteCount = payload.health.failedWriteCount ?? 0;
+      payload.lastWriteErrorAt = payload.health.lastWriteErrorAt ?? null;
+      payload.lastWriteErrorMessage = payload.health.lastWriteErrorMessage ?? null;
     } catch (error) {
       payload.healthError = error.message;
     }
@@ -878,6 +1003,91 @@ async function statusCommand(options) {
     } else {
       console.log("Proxy is not running.");
     }
+  }
+}
+
+async function captureCommand(options, action) {
+  if (!["on", "off", "status"].includes(action)) {
+    throw new Error(`Unknown capture action: ${action}`);
+  }
+
+  if (action === "status") {
+    const runtime = loadRuntimeProxyConfig();
+    const state = loadManagedState();
+    const payload = {
+      ok: true,
+      running: Boolean(state?.pid && isProcessAlive(state.pid)),
+      persistedConfig: loadUserConfig(),
+      runtimeConfig: runtime?.capture ?? null
+    };
+    if (state?.proxyUrl && payload.running) {
+      try {
+        payload.health = await waitForHealthyProxy(state.proxyUrl, 2000);
+      } catch (error) {
+        payload.healthError = error.message;
+      }
+    }
+    if (!maybePrintJson(options, payload)) {
+      console.log(`Capture running: ${payload.running ? "yes" : "no"}`);
+      console.log(`Persisted capture enabled: ${payload.persistedConfig.captureEnabled ? "yes" : "no"}`);
+      console.log(`Persisted capture DB: ${payload.persistedConfig.captureDbPath || DEFAULT_CAPTURE_DB_PATH}`);
+      if (payload.runtimeConfig) {
+        console.log(`Runtime capture enabled: ${payload.runtimeConfig.enabled ? "yes" : "no"}`);
+        console.log(`Runtime capture DB: ${payload.runtimeConfig.dbPath || DEFAULT_CAPTURE_DB_PATH}`);
+      }
+    }
+    return;
+  }
+
+  const enabled = action === "on";
+  const persistedConfig = applyUserConfigPatch({
+    captureEnabled: enabled,
+    captureDbPath: ensureCaptureDbPath(loadUserConfig().captureDbPath)
+  });
+
+  const payload = {
+    ok: true,
+    action,
+    persistedConfig,
+    runtimeUpdated: false,
+    message: ""
+  };
+
+  const managedState = loadManagedState();
+  const running = Boolean(managedState?.pid && isProcessAlive(managedState.pid));
+  if (!running) {
+    payload.message = "Capture preference saved. It will apply the next time the proxy starts.";
+    if (!maybePrintJson(options, payload)) {
+      console.log(payload.message);
+    }
+    return;
+  }
+
+  const runtimeConfig = loadRuntimeProxyConfig();
+  if (!runtimeConfig) {
+    throw new Error(`Runtime proxy config not found: ${NODE_RUNTIME_CONFIG_PATH}`);
+  }
+  runtimeConfig.capture = {
+    enabled,
+    dbPath: ensureCaptureDbPath(
+      runtimeConfig.capture?.dbPath || persistedConfig.captureDbPath || DEFAULT_CAPTURE_DB_PATH
+    )
+  };
+  writeProxyConfig(NODE_RUNTIME_CONFIG_PATH, runtimeConfig);
+  payload.runtimeUpdated = true;
+  payload.message = "Capture preference saved and runtime config updated.";
+
+  if (managedState.proxyUrl) {
+    try {
+      const health = await waitForHealthyProxy(managedState.proxyUrl, 4000);
+      payload.health = health;
+    } catch (error) {
+      payload.healthError = error.message;
+    }
+  }
+
+  if (!maybePrintJson(options, payload)) {
+    console.log(payload.message);
   }
 }
 
@@ -907,7 +1117,28 @@ async function installCliCommand(options) {
 }
 
 async function main() {
-  const { command, options } = parseCommandLine(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  if (argv[0] === "capture") {
+    const action = argv[1];
+    const options = {};
+    for (let index = 2; index < argv.length; index += 1) {
+      const token = argv[index];
+      if (!token.startsWith("--")) {
+        throw new Error(`Unexpected argument: ${token}`);
+      }
+      const key = token.slice(2);
+      const next = argv[index + 1];
+      if (!next || next.startsWith("--")) {
+        options[key] = true;
+        continue;
+      }
+      options[key] = next;
+      index += 1;
+    }
+    return await captureCommand(options, action);
+  }
+
+  const { command, options } = parseCommandLine(argv);
   if (command === "check") return checkCommand(options);
   if (command === "init") return await initCommand(options);
   if (command === "guide") return guideCommand(options);

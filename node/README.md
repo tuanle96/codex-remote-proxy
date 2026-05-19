@@ -43,6 +43,8 @@ The easiest persistent setup is to add this section to `~/.codex/config.toml`:
 [codex_remote_proxy]
 upstream_base_url = "https://your-upstream.example.com"
 upstream_api_key = "sk-your-key"
+capture_enabled = true
+capture_db_path = "/Users/you/.codex-remote-proxy/traffic.sqlite3"
 ```
 
 Then run:
@@ -71,6 +73,8 @@ crp start
 ```bash
 export CRP_UPSTREAM_BASE_URL="https://your-upstream.example.com"
 export CRP_UPSTREAM_API_KEY="sk-your-key"
+export CRP_CAPTURE_ENABLED="true"
+export CRP_CAPTURE_DB_PATH="/Users/you/.codex-remote-proxy/traffic.sqlite3"
 crp start
 ```
 
@@ -78,9 +82,36 @@ crp start
 
 1. CLI flags
 2. Environment variables
-3. `~/.codex/config.toml` under `[codex_remote_proxy]` using `upstream_base_url` and `upstream_api_key`
+3. `~/.codex/config.toml` under `[codex_remote_proxy]` using `upstream_base_url`, `upstream_api_key`, `capture_enabled`, and `capture_db_path`
 4. Saved config from `crp init`
 5. Interactive prompts
+
+## Request Capture
+
+SQLite request capture is optional and off by default.
+
+When enabled, the proxy stores one full request/response transaction per row in:
+
+```text
+~/.codex-remote-proxy/traffic.sqlite3
+```
+
+You can enable it at startup:
+
+```bash
+crp start --capture
+crp start --capture --capture-db-path /Users/you/.codex-remote-proxy/custom-traffic.sqlite3
+```
+
+Or hot-toggle it on a running proxy:
+
+```bash
+crp capture on
+crp capture off
+crp capture status --json
+```
+
+Edits to `~/.codex-remote-proxy/node/proxy-config.json` also hot-apply `capture.enabled`. Changes to `capture.dbPath` are detected but require a restart before the new database path is used.
 
 ## Main Commands
 
@@ -91,7 +122,10 @@ crp start
   Accept upstream settings from CLI flags, environment variables, `~/.codex/config.toml` `[codex_remote_proxy]`, or prompts; choose a free port, patch Codex, and start the proxy in the background by default
 
 - `crp init`
-  Save upstream settings once under `~/.codex-remote-proxy/`
+  Save upstream settings and optional capture defaults once under `~/.codex-remote-proxy/`
+
+- `crp capture on|off|status`
+  Toggle SQLite request capture at runtime for a managed proxy, or save the preference for the next start
 
 - `crp status`
   Show managed service status and health
@@ -107,4 +141,5 @@ crp start
 - `crp start` modifies `~/.codex/config.toml` and creates a backup
 - the managed proxy runs in the background by default
 - managed state and logs live under `~/.codex-remote-proxy/`
-- Node.js 20 or newer is required
+- request capture redacts sensitive headers before writing
+- Node.js 22.13.0 or newer is required

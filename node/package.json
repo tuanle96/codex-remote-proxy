@@ -16,10 +16,11 @@
     "start": "node src/server.mjs",
     "check": "node bin/crp.mjs check",
     "status": "node bin/crp.mjs status",
-    "guide": "node bin/crp.mjs guide"
+    "guide": "node bin/crp.mjs guide",
+    "test": "node --test"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13.0"
   },
   "dependencies": {
     "fzstd": "^0.1.1"

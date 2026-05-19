@@ -1,10 +1,18 @@
 import http from "node:http";
 import https from "node:https";
-import { URL } from "node:url";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
+import { URL } from "node:url";
 import zlib from "node:zlib";
 import { decompress as zstdDecompress } from "fzstd";
+
+import {
+  createCaptureManager,
+  createNoopCaptureHandle,
+  DEFAULT_CAPTURE_DB_PATH,
+  headersToObject,
+  normalizeCaptureConfig
+} from "./capture-store.mjs";
 
 const CONFIG_ENV_VAR = "CODEX_PROXY_CONFIG";
 const DEFAULT_CONFIG_PATH = resolve(import.meta.dirname, "..", "proxy-config.json");
@@ -24,11 +32,18 @@ const HOP_BY_HOP_HEADERS = new Set([
 
 let DEBUG_ENABLED = false;
 
-function resolveConfigPath() {
+export function resolveConfigPath() {
   return process.env[CONFIG_ENV_VAR] ? resolve(process.env[CONFIG_ENV_VAR]) : DEFAULT_CONFIG_PATH;
 }
 
-function loadConfig(configPath = resolveConfigPath()) {
+function isStringMap(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  return Object.entries(value).every(([key, item]) => typeof key === "string" && typeof item === "string");
+}
+
+export function loadConfig(configPath = resolveConfigPath()) {
   let parsed;
   try {
     parsed = JSON.parse(readFileSync(configPath, "utf8"));
@@ -39,6 +54,7 @@ function loadConfig(configPath = resolveConfigPath()) {
   const server = parsed.server ?? {};
   const upstream = parsed.upstream ?? {};
   const proxy = parsed.proxy ?? {};
+  const capture = parsed.capture ?? {};
 
   if (!upstream.baseUrl || typeof upstream.baseUrl !== "string") {
     throw new Error("upstream.baseUrl is required");
@@ -66,15 +82,13 @@ function loadConfig(configPath = resolveConfigPath()) {
     proxy: {
       overrideAuthorization: typeof proxy.overrideAuthorization === "boolean" ? proxy.overrideAuthorization : true,
       requestIdHeader: typeof proxy.requestIdHeader === "string" && proxy.requestIdHeader ? proxy.requestIdHeader : "x-client-request-id"
-    }
+    },
+    capture: normalizeCaptureConfig(capture, {
+      baseDir: dirname(configPath),
+      defaultDbPath: DEFAULT_CAPTURE_DB_PATH,
+      strict: true
+    })
   };
-}
-
-function isStringMap(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  return Object.entries(value).every(([key, item]) => typeof key === "string" && typeof item === "string");
 }
 
 function maskSecret(value) {
@@ -87,7 +101,7 @@ function maskSecret(value) {
   return `${value.slice(0, 4)}...${value.slice(-4)}`;
 }
 
-function log(level, message, fields = {}) {
+export function log(level, message, fields = {}) {
   const parts = Object.entries(fields).map(([key, value]) => `${key}=${value}`);
   const suffix = parts.length ? ` ${parts.join(" ")}` : "";
   console.log(`${new Date().toISOString()} ${level.toUpperCase()} ${message}${suffix}`);
@@ -106,13 +120,13 @@ function safeBodyPreview(buffer, maxLen = 4096) {
   if (!buffer || !buffer.length) return "(empty)";
   try {
     const text = buffer.toString("utf-8");
-    return text.length > maxLen ? text.slice(0, maxLen) + `... (${buffer.length} bytes total)` : text;
+    return text.length > maxLen ? `${text.slice(0, maxLen)}... (${buffer.length} bytes total)` : text;
   } catch {
     return `(${buffer.length} bytes, binary)`;
   }
 }
 
-function buildTargetUrl(baseUrl, requestUrl) {
+export function buildTargetUrl(baseUrl, requestUrl) {
   const incoming = new URL(requestUrl, "http://127.0.0.1");
   const path = incoming.pathname === "/" ? "" : incoming.pathname;
   return new URL(`${baseUrl}${path}${incoming.search}`);
@@ -156,7 +170,7 @@ function sanitizeHeadersForDebug(headersObject) {
   return result;
 }
 
-function buildUpstreamHeaders(req, settings, targetUrl, { stripContentHeaders }) {
+export function buildUpstreamHeaders(req, settings, targetUrl, { stripContentHeaders }) {
   const headers = [];
   const authHeader = settings.upstream.authHeader.toLowerCase();
 
@@ -223,7 +237,77 @@ function isEventStream(contentType = "") {
   return contentType.split(";", 1)[0].trim().toLowerCase() === "text/event-stream";
 }
 
-function createServer(settings) {
+function buildHealthPayload(settings, captureManager) {
+  return {
+    ok: true,
+    configPath: settings.configPath,
+    listenHost: settings.server.host,
+    listenPort: settings.server.port,
+    upstreamBaseUrl: settings.upstream.baseUrl,
+    overrideAuthorization: settings.proxy.overrideAuthorization,
+    authHeader: settings.upstream.authHeader,
+    authScheme: settings.upstream.authScheme,
+    extraHeaderCount: Object.keys(settings.upstream.extraHeaders).length,
+    ...captureManager.getPublicState()
+  };
+}
+
+function buildRequestContext({ req, settings, targetUrl, requestId, requestHeaders, requestBody, startedAt, captureHandle }) {
+  const turnMetadataHeader = req.headers["x-codex-turn-metadata"];
+  let turnMetadata = null;
+  if (typeof turnMetadataHeader === "string") {
+    try {
+      turnMetadata = JSON.parse(turnMetadataHeader);
+    } catch {
+      turnMetadata = null;
+    }
+  }
+
+  return {
+    requestId,
+    sessionId: typeof req.headers["session-id"] === "string"
+      ? req.headers["session-id"]
+      : (typeof req.headers["session_id"] === "string" ? req.headers["session_id"] : (turnMetadata?.session_id || null)),
+    threadId: typeof req.headers["thread-id"] === "string"
+      ? req.headers["thread-id"]
+      : (typeof req.headers["thread_id"] === "string" ? req.headers["thread_id"] : (turnMetadata?.thread_id || null)),
+    method: req.method || "GET",
+    incomingUrl: new URL(req.url, `http://${settings.server.host}:${settings.server.port}`).href,
+    targetUrl: targetUrl.href,
+    requestHeaders: headersToObject(requestHeaders),
+    requestBody,
+    startedAt: new Date(startedAt).toISOString(),
+    captureHandle
+  };
+}
+
+function saveCaptureRecord(captureContext, fields) {
+  if (!captureContext?.captureHandle) {
+    return;
+  }
+  captureContext.captureHandle.save({
+    startedAt: captureContext.startedAt,
+    completedAt: new Date().toISOString(),
+    durationMs: Date.now() - Date.parse(captureContext.startedAt),
+    requestId: captureContext.requestId,
+    sessionId: captureContext.sessionId,
+    threadId: captureContext.threadId,
+    method: captureContext.method,
+    incomingUrl: captureContext.incomingUrl,
+    targetUrl: captureContext.targetUrl,
+    requestHeaders: captureContext.requestHeaders,
+    requestBody: captureContext.requestBody,
+    responseStatus: fields.responseStatus,
+    responseHeaders: fields.responseHeaders ?? {},
+    responseBody: fields.responseBody ?? Buffer.alloc(0),
+    isStream: fields.isStream ?? false,
+    upstreamRequestId: fields.upstreamRequestId ?? null,
+    errorType: fields.errorType ?? null,
+    errorMessage: fields.errorMessage ?? null
+  });
+}
+
+export function createServer(settings, { captureManager = createCaptureManager({ configPath: settings.configPath, capture: settings.capture, log }).start(), logFn = log } = {}) {
   return http.createServer((req, res) => {
     if (!req.url) {
       writeJson(res, 400, { error: { message: "Missing request URL", type: "proxy_bad_request" } });
@@ -231,17 +315,7 @@ function createServer(settings) {
     }
 
     if (req.url === HEALTH_PATH) {
-      writeJson(res, 200, {
-        ok: true,
-        configPath: settings.configPath,
-        listenHost: settings.server.host,
-        listenPort: settings.server.port,
-        upstreamBaseUrl: settings.upstream.baseUrl,
-        overrideAuthorization: settings.proxy.overrideAuthorization,
-        authHeader: settings.upstream.authHeader,
-        authScheme: settings.upstream.authScheme,
-        extraHeaderCount: Object.keys(settings.upstream.extraHeaders).length
-      });
+      writeJson(res, 200, buildHealthPayload(settings, captureManager));
       return;
     }
 
@@ -250,42 +324,62 @@ function createServer(settings) {
     const transport = targetUrl.protocol === "https:" ? https : http;
     const startedAt = Date.now();
 
-      const chunks = [];
-      req.on("data", (chunk) => chunks.push(chunk));
-      req.on("end", () => {
-        let body = Buffer.concat(chunks);
-        const contentEncoding = req.headers["content-encoding"];
-        let bodyTransformed = false;
-        if (contentEncoding && body.length) {
-          try {
-            body = decompressBody(body, contentEncoding);
-            bodyTransformed = true;
-          } catch (error) {
-            log("warn", "Failed to decompress request body", {
-              encoding: contentEncoding,
-              error: error.message
-            });
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      let body = Buffer.concat(chunks);
+      const contentEncoding = req.headers["content-encoding"];
+      let bodyTransformed = false;
+      if (contentEncoding && body.length) {
+        try {
+          body = decompressBody(body, contentEncoding);
+          bodyTransformed = true;
+        } catch (error) {
+          logFn("warn", "Failed to decompress request body", {
+            encoding: contentEncoding,
+            error: error.message
+          });
         }
-        } else if (body.length >= 2 && contentEncoding === undefined) {
-          const decompressed = autoDecompress(body);
-          if (decompressed) {
-            debugLog("AUTODECOMP", {
-              originalSize: body.length,
-              decompressedSize: decompressed.length,
-              magicBytes: `0x${body[0].toString(16).padStart(2, "0")} 0x${body[1].toString(16).padStart(2, "0")}`,
-            });
-            body = decompressed;
-            bodyTransformed = true;
-          }
+      } else if (body.length >= 2 && contentEncoding === undefined) {
+        const decompressed = autoDecompress(body);
+        if (decompressed) {
+          debugLog("AUTODECOMP", {
+            originalSize: body.length,
+            decompressedSize: decompressed.length,
+            magicBytes: `0x${body[0].toString(16).padStart(2, "0")} 0x${body[1].toString(16).padStart(2, "0")}`
+          });
+          body = decompressed;
+          bodyTransformed = true;
         }
+      }
 
       const headers = buildUpstreamHeaders(req, settings, targetUrl, {
         stripContentHeaders: bodyTransformed
       });
-      if (bodyTransformed) {
-        if (body.length) {
-          upsertHeader(headers, "content-length", String(Buffer.byteLength(body)));
+      if (bodyTransformed && body.length) {
+        upsertHeader(headers, "content-length", String(Buffer.byteLength(body)));
+      }
+
+      const captureHandle = captureManager.beginRecord() ?? createNoopCaptureHandle();
+      const captureContext = buildRequestContext({
+        req,
+        settings,
+        targetUrl,
+        requestId,
+        requestHeaders: headers,
+        requestBody: body,
+        startedAt,
+        captureHandle
+      });
+      let captureSaved = false;
+      let responseCompleted = false;
+
+      function finalizeCapture(fields) {
+        if (captureSaved) {
+          return;
         }
+        captureSaved = true;
+        saveCaptureRecord(captureContext, fields);
       }
 
       debugLog("REQUEST", {
@@ -294,7 +388,7 @@ function createServer(settings) {
         targetUrl: targetUrl.href,
         incomingHeaders: sanitizeHeadersForDebug(Object.fromEntries(Object.entries(req.headers))),
         upstreamHeaders: Object.fromEntries(headers.map(([k, v]) => [k, k.toLowerCase() === "authorization" ? maskSecret(v) : v])),
-        body: safeBodyPreview(body),
+        body: safeBodyPreview(body)
       });
 
       const upstreamRequest = transport.request(
@@ -309,28 +403,37 @@ function createServer(settings) {
         },
         (upstreamResponse) => {
           const stream = isEventStream(upstreamResponse.headers["content-type"]);
-
           debugLog("RESPONSE HEADERS", {
             status: upstreamResponse.statusCode,
-            headers: upstreamResponse.headers,
+            headers: upstreamResponse.headers
           });
 
+          const responseHeaders = headersToObject(upstreamResponse.rawHeaders);
           const respChunks = [];
-          if (!stream) {
-            upstreamResponse.on("data", (chunk) => respChunks.push(chunk));
-          }
+          upstreamResponse.on("data", (chunk) => {
+            respChunks.push(chunk);
+          });
 
           res.statusCode = upstreamResponse.statusCode || 502;
           writeHeadersToResponse(res, upstreamResponse.rawHeaders);
           upstreamResponse.pipe(res);
           upstreamResponse.on("end", () => {
-            if (!stream && respChunks.length) {
+            responseCompleted = true;
+            const responseBody = Buffer.concat(respChunks);
+            if (responseBody.length) {
               debugLog("RESPONSE BODY", {
                 status: upstreamResponse.statusCode,
-                body: safeBodyPreview(Buffer.concat(respChunks)),
+                body: safeBodyPreview(responseBody)
               });
             }
-            log("info", "Proxied request", {
+            finalizeCapture({
+              responseStatus: upstreamResponse.statusCode || 502,
+              responseHeaders,
+              responseBody,
+              isStream: stream,
+              upstreamRequestId: typeof upstreamResponse.headers["x-request-id"] === "string" ? upstreamResponse.headers["x-request-id"] : null
+            });
+            logFn("info", "Proxied request", {
               request_id: requestId,
               method: req.method || "GET",
               path: req.url,
@@ -348,23 +451,39 @@ function createServer(settings) {
 
       upstreamRequest.on("error", (error) => {
         const statusCode = error.message === "upstream timeout" ? 504 : 502;
+        const errorType = statusCode === 504 ? "proxy_timeout" : "proxy_upstream_error";
+        const payload = {
+          error: {
+            message: statusCode === 504 ? "Upstream request timed out" : "Failed to reach upstream service",
+            type: errorType,
+            request_id: requestId
+          }
+        };
+        const responseBody = Buffer.from(JSON.stringify(payload));
+        const responseHeaders = {
+          "content-type": "application/json; charset=utf-8",
+          "content-length": String(responseBody.length)
+        };
+
         debugLog("UPSTREAM ERROR", {
           error: error.message,
           code: error.code || "(none)",
-          stack: error.stack,
+          stack: error.stack
         });
         if (!res.headersSent) {
-          writeJson(res, statusCode, {
-            error: {
-              message: statusCode === 504 ? "Upstream request timed out" : "Failed to reach upstream service",
-              type: statusCode === 504 ? "proxy_timeout" : "proxy_upstream_error",
-              request_id: requestId
-            }
-          });
+          writeJson(res, statusCode, payload);
         } else {
           res.destroy(error);
         }
-        log("warn", "Proxy request failed", {
+        finalizeCapture({
+          responseStatus: statusCode,
+          responseHeaders,
+          responseBody,
+          errorType,
+          errorMessage: error.message,
+          upstreamRequestId: null
+        });
+        logFn("warn", "Proxy request failed", {
           request_id: requestId,
           method: req.method || "GET",
           path: req.url,
@@ -374,34 +493,73 @@ function createServer(settings) {
         });
       });
 
+      res.on("close", () => {
+        if (responseCompleted || res.writableFinished) {
+          return;
+        }
+        finalizeCapture({
+          responseStatus: res.statusCode || null,
+          responseHeaders: {},
+          responseBody: Buffer.alloc(0),
+          isStream: false,
+          upstreamRequestId: null,
+          errorType: "proxy_client_abort",
+          errorMessage: "Client closed connection"
+        });
+      });
+
       upstreamRequest.end(body);
     });
   });
 }
 
-const settings = loadConfig();
-DEBUG_ENABLED = settings.server.logLevel.toLowerCase() === "debug";
-log("info", "Loaded proxy config", {
-  config_path: settings.configPath,
-  upstream: settings.upstream.baseUrl,
-  auth_override: settings.proxy.overrideAuthorization,
-  auth_header: settings.upstream.authHeader,
-  api_key: maskSecret(settings.upstream.apiKey)
-});
+export function createApp(settings = loadConfig()) {
+  DEBUG_ENABLED = settings.server.logLevel.toLowerCase() === "debug";
+  const captureManager = createCaptureManager({
+    configPath: settings.configPath,
+    capture: settings.capture,
+    log
+  }).start();
 
-const server = createServer(settings);
-server.on("error", (error) => {
-  log("error", "Node proxy failed to listen", {
-    host: settings.server.host,
-    port: settings.server.port,
-    error: JSON.stringify(error.message)
+  log("info", "Loaded proxy config", {
+    config_path: settings.configPath,
+    upstream: settings.upstream.baseUrl,
+    auth_override: settings.proxy.overrideAuthorization,
+    auth_header: settings.upstream.authHeader,
+    api_key: maskSecret(settings.upstream.apiKey),
+    capture_enabled: settings.capture.enabled,
+    capture_db_path: settings.capture.dbPath
   });
-  process.exit(1);
-});
 
-server.listen(settings.server.port, settings.server.host, () => {
-  log("info", "Node proxy listening", {
-    host: settings.server.host,
-    port: settings.server.port
+  const server = createServer(settings, { captureManager, logFn: log });
+  server.on("close", () => {
+    captureManager.close();
   });
-});
+
+  return { server, settings, captureManager };
+}
+
+export function startServer(settings = loadConfig()) {
+  const app = createApp(settings);
+  app.server.on("error", (error) => {
+    log("error", "Node proxy failed to listen", {
+      host: settings.server.host,
+      port: settings.server.port,
+      error: JSON.stringify(error.message)
+    });
+    process.exit(1);
+  });
+
+  app.server.listen(settings.server.port, settings.server.host, () => {
+    log("info", "Node proxy listening", {
+      host: settings.server.host,
+      port: settings.server.port
+    });
+  });
+
+  return app;
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  startServer();
+}

@@ -16,5 +16,9 @@
   "proxy": {
     "overrideAuthorization": true,
     "requestIdHeader": "x-client-request-id"
+  },
+  "capture": {
+    "enabled": false,
+    "dbPath": "/Users/you/.codex-remote-proxy/traffic.sqlite3"
   }
 }
