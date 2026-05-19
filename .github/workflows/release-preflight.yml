@@ -38,5 +38,15 @@ jobs:
       - name: Run tests if present
         run: npm run test --if-present
 
+      - name: Detect changeset files
+        id: changesets
+        run: |
+          if find .changeset -name "*.md" ! -name "README.md" | grep -q .; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Validate changeset state
-        run: npm run changeset -- status
+        if: steps.changesets.outputs.present == 'true'
+        run: npm run changeset -- status --since=origin/main
