@@ -1,6 +1,6 @@
 {
   "name": "@cluic/codex-remote-proxy",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Node.js local proxy for Codex remote ChatGPT login patch",
   "type": "module",
   "repository": {
