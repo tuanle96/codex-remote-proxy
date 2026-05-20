@@ -245,5 +245,8 @@ Notes:
 - [`node/`](./node)
   The packaged npm implementation.
 
+- [`node/RELEASING.md`](./node/RELEASING.md)
+  Release setup and automated npm publishing flow.
+
 - [`README.zh-CN.md`](./README.zh-CN.md)
   Chinese documentation

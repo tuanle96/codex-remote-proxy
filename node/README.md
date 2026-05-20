@@ -136,6 +136,20 @@ Edits to `~/.codex-remote-proxy/node/proxy-config.json` also hot-apply `capture.
 - `crp guide`
   Print AI-oriented usage guidance
 
+## Release Flow
+
+This package uses Changesets and GitHub Actions for npm releases.
+
+From `node/`:
+
+```bash
+npm run changeset
+```
+
+Commit the generated file under `.changeset/` with your feature PR. After the PR is merged to `main`, GitHub Actions will open or update a release PR. Merging that release PR publishes the package to npm.
+
+See [RELEASING.md](./RELEASING.md) for the one-time npm Trusted Publishing setup.
+
 ## Notes
 
 - `crp start` modifies `~/.codex/config.toml` and creates a backup

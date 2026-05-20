@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests if present
+        run: npm run test --if-present
+
+      - name: Prepare npm for trusted publishing
+        run: |
+          rm -f "${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          cat <<'EOF' > "$HOME/.npmrc"
+          registry=https://registry.npmjs.org/
+          EOF
+          echo "NPM_CONFIG_USERCONFIG=$HOME/.npmrc" >> "$GITHUB_ENV"
+          echo "NODE_AUTH_TOKEN=" >> "$GITHUB_ENV"
+
+      - name: Create release PR or publish
+        uses: changesets/action@v1
+        with:
+          cwd: node
+          version: npm run version-packages
+          publish: npm run release
+          title: Release @cluic/codex-remote-proxy
+          commit: Release @cluic/codex-remote-proxy
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ""

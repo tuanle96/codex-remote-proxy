@@ -230,3 +230,6 @@ crp status --json
 
 - [./node](./node)
   npm 包实现
+
+- [./node/RELEASING.md](./node/RELEASING.md)
+  自动发布 npm 的配置与发布流程说明
