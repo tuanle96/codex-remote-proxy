@@ -1,5 +1,7 @@
 import http from "node:http";
 import https from "node:https";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { URL } from "node:url";
@@ -560,6 +562,43 @@ export function startServer(settings = loadConfig()) {
   return app;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+function isWindowsStylePath(filePath) {
+  return /^[A-Za-z]:[\\/]/.test(filePath);
+}
+
+function modulePathFromMetaUrl(metaUrl) {
+  const url = new URL(metaUrl);
+  if (url.protocol !== "file:") {
+    return null;
+  }
+  const pathname = decodeURIComponent(url.pathname);
+  if (/^\/[A-Za-z]:\//.test(pathname)) {
+    return path.win32.normalize(pathname.slice(1));
+  }
+  return fileURLToPath(metaUrl);
+}
+
+function normalizeExecutionPath(filePath) {
+  if (!filePath) {
+    return "";
+  }
+  if (isWindowsStylePath(filePath)) {
+    return path.win32.normalize(filePath).toLowerCase();
+  }
+  return resolve(filePath);
+}
+
+export function isDirectExecution(metaUrl = import.meta.url, argv1 = process.argv[1]) {
+  if (!argv1) {
+    return false;
+  }
+  const modulePath = modulePathFromMetaUrl(metaUrl);
+  if (!modulePath) {
+    return false;
+  }
+  return normalizeExecutionPath(modulePath) === normalizeExecutionPath(argv1);
+}
+
+if (isDirectExecution()) {
   startServer();
 }

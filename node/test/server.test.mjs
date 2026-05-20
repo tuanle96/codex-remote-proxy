@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { once } from "node:events";
 import { DatabaseSync } from "node:sqlite";
 
-import { createApp } from "../src/server.mjs";
+import { createApp, isDirectExecution } from "../src/server.mjs";
 
 function makeTempDir(prefix) {
   return join(os.tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
@@ -132,4 +132,23 @@ test("server writes proxied request and response to sqlite", async () => {
   assert.match(rows[0].response_body, /"ok":true/);
 
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("isDirectExecution handles both POSIX and Windows paths", () => {
+  assert.equal(
+    isDirectExecution("file:///Users/example/project/node/src/server.mjs", "/Users/example/project/node/src/server.mjs"),
+    true
+  );
+  assert.equal(
+    isDirectExecution("file:///C:/Users/Xingh/project/node/src/server.mjs", "C:\\Users\\Xingh\\project\\node\\src\\server.mjs"),
+    true
+  );
+  assert.equal(
+    isDirectExecution("file:///c:/Users/Xingh/project/node/src/server.mjs", "C:/Users/Xingh/project/node/src/server.mjs"),
+    true
+  );
+  assert.equal(
+    isDirectExecution("file:///C:/Users/Xingh/project/node/src/server.mjs", "C:\\Users\\Xingh\\project\\node\\src\\other.mjs"),
+    false
+  );
 });
