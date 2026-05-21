@@ -92,6 +92,8 @@ CLI 统一管理目录：
 [codex_remote_proxy]
 upstream_base_url = "https://your-upstream.example.com"
 upstream_api_key = "sk-your-key"
+capture_enabled = true
+capture_db_path = "/Users/you/.codex-remote-proxy/traffic.sqlite3"
 ```
 
 之后直接执行：
@@ -124,6 +126,8 @@ crp start
 ```bash
 export CRP_UPSTREAM_BASE_URL="https://your-upstream.example.com"
 export CRP_UPSTREAM_API_KEY="sk-your-key"
+export CRP_CAPTURE_ENABLED="true"
+export CRP_CAPTURE_DB_PATH="/Users/you/.codex-remote-proxy/traffic.sqlite3"
 crp start
 ```
 
@@ -131,9 +135,38 @@ crp start
 
 1. CLI 参数
 2. 环境变量
-3. `~/.codex/config.toml` 里的 `[codex_remote_proxy]`，键名使用 `upstream_base_url` 和 `upstream_api_key`
+3. `~/.codex/config.toml` 里的 `[codex_remote_proxy]`，键名使用 `upstream_base_url`、`upstream_api_key`、`capture_enabled` 和 `capture_db_path`
 4. `crp init` 保存的本地配置
 5. 交互式输入
+
+## 请求记录
+
+SQLite 请求记录是可选功能，默认关闭。
+
+开启后，代理会把每次完整请求/响应保存成一条 SQLite 记录，默认数据库路径是：
+
+```text
+~/.codex-remote-proxy/traffic.sqlite3
+```
+
+启动时开启：
+
+```bash
+crp start --capture
+crp start --capture --capture-db-path /Users/you/.codex-remote-proxy/custom-traffic.sqlite3
+```
+
+对正在运行的代理做热切换：
+
+```bash
+crp capture on
+crp capture off
+crp capture status --json
+```
+
+你也可以直接编辑 `~/.codex-remote-proxy/node/proxy-config.json`。其中 `capture.enabled` 会在代理校验 SQLite 成功后热生效；`capture.dbPath` 的变化会被探测到，但需要重启后才会真正切到新路径。
+
+写入前会默认脱敏敏感请求头，例如 `Authorization`、`Cookie`、`Set-Cookie` 以及名称中包含 `token`、`secret`、`api-key` 的头。
 
 ## 全局 CLI
 
@@ -146,10 +179,13 @@ crp start
   从 CLI 参数、环境变量、`~/.codex/config.toml` 的 `[codex_remote_proxy]` 或交互输入中获取上游配置，自动选择空闲端口，修改 Codex 配置，并默认后台启动代理
 
 - `crp init`
-  先把上游配置安全保存到 `~/.codex-remote-proxy/`，如果你不想把密钥写进 `~/.codex/config.toml`，以后 `crp start` 也不需要再重复输入
+  先把上游配置和可选的请求记录默认值安全保存到 `~/.codex-remote-proxy/`，如果你不想把密钥写进 `~/.codex/config.toml`，以后 `crp start` 也不需要再重复输入
 
 - `crp install`
   与 `crp start` 等价的兼容别名
+
+- `crp capture on|off|status`
+  对托管中的代理热切换 SQLite 请求记录；如果代理当前没运行，则保存为下次启动时生效的偏好
 
 - `crp status`
   查看当前托管服务状态和健康检查结果。如果代理在运行但不是 CLI 托管的，也会尝试探测
@@ -164,6 +200,7 @@ crp start
 
 ```bash
 crp check --json
+crp capture status --json
 crp guide --json
 crp status --json
 ```
@@ -175,7 +212,7 @@ crp status --json
 1. 先跑 `crp check --json`
 2. 读取 `recommendedImplementation`
 3. 如果 Node 依赖就绪，优先走 `node`
-4. 优先使用现有 `~/.codex/config.toml` 里的 `[codex_remote_proxy]`，并使用 `upstream_base_url` / `upstream_api_key` 这两个键，否则让用户先在本地跑一次 `crp init`，或者提前在系统里设置好环境变量
+4. 优先使用现有 `~/.codex/config.toml` 里的 `[codex_remote_proxy]`，并使用 `upstream_base_url` / `upstream_api_key` / `capture_enabled` / `capture_db_path` 这些键，否则让用户先在本地跑一次 `crp init`，或者提前在系统里设置好环境变量
 5. 再跑 `crp start`
 6. 从返回结果中读取 `proxyUrl`、`pid`、`health`
 7. 之后用 `crp status --json` 做确认
@@ -185,6 +222,7 @@ crp status --json
 - `start` 会修改 `~/.codex/config.toml`
 - `install` 会先创建备份
 - 托管状态和日志保存在 `~/.codex-remote-proxy/`
+- 只有在显式开启时才会写 SQLite 请求记录
 - 如果你是直接从当前仓库运行，需要先执行 `cd node && npm install`
 - `~/.codex/config.toml`、`crp init` 或环境变量模式都可以避免后续 AI 直接接触密钥
 
