@@ -114,7 +114,9 @@ export function loadConfig(configPath = resolveConfigPath()) {
       authHeader: typeof upstream.authHeader === "string" && upstream.authHeader ? upstream.authHeader : "authorization",
       authScheme: typeof upstream.authScheme === "string" ? upstream.authScheme : "Bearer",
       extraHeaders: isStringMap(upstream.extraHeaders) ? upstream.extraHeaders : {},
-      modelOverride: typeof upstream.modelOverride === "string" && upstream.modelOverride ? upstream.modelOverride : null
+      modelOverride: typeof upstream.modelOverride === "string" && upstream.modelOverride ? upstream.modelOverride : null,
+      retryAttempts: Number.isInteger(upstream.retryAttempts) && upstream.retryAttempts >= 0 ? upstream.retryAttempts : 3,
+      retryDelayMs: Number.isInteger(upstream.retryDelayMs) && upstream.retryDelayMs >= 0 ? upstream.retryDelayMs : 1000
     },
     proxy: {
       overrideAuthorization: typeof proxy.overrideAuthorization === "boolean" ? proxy.overrideAuthorization : true,
@@ -1283,124 +1285,149 @@ export function createServer(settings, { captureManager = createCaptureManager({
         body: safeBodyPreview(body)
       });
 
-      const upstreamRequest = transport.request(
-        {
-          method: req.method,
-          protocol: targetUrl.protocol,
-          hostname: targetUrl.hostname,
-          port: targetUrl.port || undefined,
-          path: `${targetUrl.pathname}${targetUrl.search}`,
-          headers,
-          rejectUnauthorized: settings.upstream.verifySsl
-        },
-        (upstreamResponse) => {
-          const stream = isEventStream(upstreamResponse.headers["content-type"]);
-          debugLog("RESPONSE HEADERS", {
-            status: upstreamResponse.statusCode,
-            headers: upstreamResponse.headers
-          });
+      function attemptUpstreamRequest(attemptNumber) {
+        const upstreamRequest = transport.request(
+          {
+            method: req.method,
+            protocol: targetUrl.protocol,
+            hostname: targetUrl.hostname,
+            port: targetUrl.port || undefined,
+            path: `${targetUrl.pathname}${targetUrl.search}`,
+            headers,
+            rejectUnauthorized: settings.upstream.verifySsl
+          },
+          (upstreamResponse) => {
+            const stream = isEventStream(upstreamResponse.headers["content-type"]);
+            debugLog("RESPONSE HEADERS", {
+              status: upstreamResponse.statusCode,
+              headers: upstreamResponse.headers
+            });
 
-          const responseHeaders = headersToObject(upstreamResponse.rawHeaders);
-          const respChunks = [];
-          upstreamResponse.on("data", (chunk) => {
-            respChunks.push(chunk);
-          });
+            const responseHeaders = headersToObject(upstreamResponse.rawHeaders);
+            const respChunks = [];
+            upstreamResponse.on("data", (chunk) => {
+              respChunks.push(chunk);
+            });
 
-          res.statusCode = upstreamResponse.statusCode || 502;
-          writeHeadersToResponse(res, upstreamResponse.rawHeaders);
-          upstreamResponse.pipe(res);
-          upstreamResponse.on("end", () => {
-            responseCompleted = true;
-            const responseBody = Buffer.concat(respChunks);
-            if (responseBody.length) {
-              debugLog("RESPONSE BODY", {
-                status: upstreamResponse.statusCode,
-                body: safeBodyPreview(responseBody)
+            res.statusCode = upstreamResponse.statusCode || 502;
+            writeHeadersToResponse(res, upstreamResponse.rawHeaders);
+            upstreamResponse.pipe(res);
+            upstreamResponse.on("end", () => {
+              responseCompleted = true;
+              const responseBody = Buffer.concat(respChunks);
+              if (responseBody.length) {
+                debugLog("RESPONSE BODY", {
+                  status: upstreamResponse.statusCode,
+                  body: safeBodyPreview(responseBody)
+                });
+              }
+              finalizeCapture({
+                responseStatus: upstreamResponse.statusCode || 502,
+                responseHeaders,
+                responseBody,
+                isStream: stream,
+                upstreamRequestId: typeof upstreamResponse.headers["x-request-id"] === "string" ? upstreamResponse.headers["x-request-id"] : null
               });
-            }
-            finalizeCapture({
-              responseStatus: upstreamResponse.statusCode || 502,
-              responseHeaders,
-              responseBody,
-              isStream: stream,
-              upstreamRequestId: typeof upstreamResponse.headers["x-request-id"] === "string" ? upstreamResponse.headers["x-request-id"] : null
+              logFn("info", "Proxied request", {
+                request_id: requestId,
+                method: req.method || "GET",
+                path: req.url,
+                status: upstreamResponse.statusCode || 502,
+                stream,
+                duration_ms: Date.now() - startedAt,
+                retry_attempt: attemptNumber > 0 ? attemptNumber : undefined
+              });
             });
-            logFn("info", "Proxied request", {
-              request_id: requestId,
-              method: req.method || "GET",
-              path: req.url,
-              status: upstreamResponse.statusCode || 502,
-              stream,
-              duration_ms: Date.now() - startedAt
-            });
-          });
-        }
-      );
-
-      upstreamRequest.setTimeout(settings.upstream.timeoutMs, () => {
-        upstreamRequest.destroy(new Error("upstream timeout"));
-      });
-
-      upstreamRequest.on("error", (error) => {
-        const statusCode = error.message === "upstream timeout" ? 504 : 502;
-        const errorType = statusCode === 504 ? "proxy_timeout" : "proxy_upstream_error";
-        const payload = {
-          error: {
-            message: statusCode === 504 ? "Upstream request timed out" : "Failed to reach upstream service",
-            type: errorType,
-            request_id: requestId
           }
-        };
-        const responseBody = Buffer.from(JSON.stringify(payload));
-        const responseHeaders = {
-          "content-type": "application/json; charset=utf-8",
-          "content-length": String(responseBody.length)
-        };
+        );
 
-        debugLog("UPSTREAM ERROR", {
-          error: error.message,
-          code: error.code || "(none)",
-          stack: error.stack
+        upstreamRequest.setTimeout(settings.upstream.timeoutMs, () => {
+          upstreamRequest.destroy(new Error("upstream timeout"));
         });
-        if (!res.headersSent) {
-          writeJson(res, statusCode, payload);
-        } else {
-          res.destroy(error);
-        }
-        finalizeCapture({
-          responseStatus: statusCode,
-          responseHeaders,
-          responseBody,
-          errorType,
-          errorMessage: error.message,
-          upstreamRequestId: null
-        });
-        logFn("warn", "Proxy request failed", {
-          request_id: requestId,
-          method: req.method || "GET",
-          path: req.url,
-          status: statusCode,
-          duration_ms: Date.now() - startedAt,
-          error: JSON.stringify(error.message)
-        });
-      });
 
-      res.on("close", () => {
-        if (responseCompleted || res.writableFinished) {
-          return;
-        }
-        finalizeCapture({
-          responseStatus: res.statusCode || null,
-          responseHeaders: {},
-          responseBody: Buffer.alloc(0),
-          isStream: false,
-          upstreamRequestId: null,
-          errorType: "proxy_client_abort",
-          errorMessage: "Client closed connection"
-        });
-      });
+        upstreamRequest.on("error", (error) => {
+          const isRetryableError = ["ECONNREFUSED", "ETIMEDOUT", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN"].includes(error.code) || error.message === "upstream timeout";
+          const canRetry = isRetryableError && attemptNumber < settings.upstream.retryAttempts;
 
-      upstreamRequest.end(body);
+          if (canRetry) {
+            const delay = settings.upstream.retryDelayMs * Math.pow(2, attemptNumber);
+            logFn("warn", "Upstream request failed, retrying", {
+              request_id: requestId,
+              attempt: attemptNumber + 1,
+              max_attempts: settings.upstream.retryAttempts,
+              retry_delay_ms: delay,
+              error: error.message,
+              error_code: error.code || "(none)"
+            });
+            setTimeout(() => attemptUpstreamRequest(attemptNumber + 1), delay);
+            return;
+          }
+
+          const statusCode = error.message === "upstream timeout" ? 504 : 502;
+          const errorType = statusCode === 504 ? "proxy_timeout" : "proxy_upstream_error";
+          const payload = {
+            error: {
+              message: statusCode === 504 ? "Upstream request timed out" : "Failed to reach upstream service",
+              type: errorType,
+              request_id: requestId
+            }
+          };
+          const responseBody = Buffer.from(JSON.stringify(payload));
+          const responseHeaders = {
+            "content-type": "application/json; charset=utf-8",
+            "content-length": String(responseBody.length)
+          };
+
+          debugLog("UPSTREAM ERROR", {
+            error: error.message,
+            code: error.code || "(none)",
+            stack: error.stack,
+            attempts: attemptNumber + 1
+          });
+          if (!res.headersSent) {
+            writeJson(res, statusCode, payload);
+          } else {
+            res.destroy(error);
+          }
+          finalizeCapture({
+            responseStatus: statusCode,
+            responseHeaders,
+            responseBody,
+            errorType,
+            errorMessage: error.message,
+            upstreamRequestId: null
+          });
+          logFn("warn", "Proxy request failed after retries", {
+            request_id: requestId,
+            method: req.method || "GET",
+            path: req.url,
+            status: statusCode,
+            duration_ms: Date.now() - startedAt,
+            attempts: attemptNumber + 1,
+            error: JSON.stringify(error.message)
+          });
+        });
+
+        res.on("close", () => {
+          if (responseCompleted || res.writableFinished) {
+            return;
+          }
+          upstreamRequest.destroy();
+          finalizeCapture({
+            responseStatus: res.statusCode || null,
+            responseHeaders: {},
+            responseBody: Buffer.alloc(0),
+            isStream: false,
+            upstreamRequestId: null,
+            errorType: "proxy_client_abort",
+            errorMessage: "Client closed connection"
+          });
+        });
+
+        upstreamRequest.end(body);
+      }
+
+      attemptUpstreamRequest(0);
     });
   });
 }
