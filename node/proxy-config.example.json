@@ -11,7 +11,8 @@
     "verifySsl": true,
     "authHeader": "authorization",
     "authScheme": "Bearer",
-    "extraHeaders": {}
+    "extraHeaders": {},
+    "modelOverride": null
   },
   "proxy": {
     "overrideAuthorization": true,

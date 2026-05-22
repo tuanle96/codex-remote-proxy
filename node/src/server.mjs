@@ -113,7 +113,8 @@ export function loadConfig(configPath = resolveConfigPath()) {
       verifySsl: typeof upstream.verifySsl === "boolean" ? upstream.verifySsl : true,
       authHeader: typeof upstream.authHeader === "string" && upstream.authHeader ? upstream.authHeader : "authorization",
       authScheme: typeof upstream.authScheme === "string" ? upstream.authScheme : "Bearer",
-      extraHeaders: isStringMap(upstream.extraHeaders) ? upstream.extraHeaders : {}
+      extraHeaders: isStringMap(upstream.extraHeaders) ? upstream.extraHeaders : {},
+      modelOverride: typeof upstream.modelOverride === "string" && upstream.modelOverride ? upstream.modelOverride : null
     },
     proxy: {
       overrideAuthorization: typeof proxy.overrideAuthorization === "boolean" ? proxy.overrideAuthorization : true,
@@ -320,11 +321,16 @@ function isEventStream(contentType = "") {
   return contentType.split(";", 1)[0].trim().toLowerCase() === "text/event-stream";
 }
 
-function normalizeResponsesPayload(payload) {
+function normalizeResponsesPayload(payload, settings) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
   let changed = false;
 
-  if (payload.model === "gpt-5.4") {
+  if (settings?.upstream?.modelOverride) {
+    if (payload.model !== settings.upstream.modelOverride) {
+      payload.model = settings.upstream.modelOverride;
+      changed = true;
+    }
+  } else if (payload.model === "gpt-5.4") {
     payload.model = "gpt-5.5";
     changed = true;
   }
@@ -372,7 +378,7 @@ function normalizeResponsesPayload(payload) {
   return changed;
 }
 
-function rewriteRequestBody(buffer, { normalizeResponses = false } = {}) {
+function rewriteRequestBody(buffer, { normalizeResponses = false, settings = null } = {}) {
   if (!buffer.length) return { body: buffer, rewritten: false, normalized: false };
   let payload;
   try {
@@ -385,11 +391,18 @@ function rewriteRequestBody(buffer, { normalizeResponses = false } = {}) {
   let normalized = false;
 
   if (normalizeResponses) {
-    normalized = normalizeResponsesPayload(payload);
+    normalized = normalizeResponsesPayload(payload, settings);
     rewritten = normalized;
-  } else if (payload && typeof payload === "object" && payload.model === "gpt-5.4") {
-    payload.model = "gpt-5.5";
-    rewritten = true;
+  } else if (payload && typeof payload === "object") {
+    if (settings?.upstream?.modelOverride) {
+      if (payload.model !== settings.upstream.modelOverride) {
+        payload.model = settings.upstream.modelOverride;
+        rewritten = true;
+      }
+    } else if (payload.model === "gpt-5.4") {
+      payload.model = "gpt-5.5";
+      rewritten = true;
+    }
   }
 
   if (rewritten) return { body: Buffer.from(JSON.stringify(payload)), rewritten, normalized };
@@ -1079,6 +1092,7 @@ function buildHealthPayload(settings, captureManager) {
     listenHost: settings.server.host,
     listenPort: settings.server.port,
     upstreamBaseUrl: settings.upstream.baseUrl,
+    modelOverride: settings.upstream.modelOverride || null,
     overrideAuthorization: settings.proxy.overrideAuthorization,
     authHeader: settings.upstream.authHeader,
     authScheme: settings.upstream.authScheme,
@@ -1189,11 +1203,11 @@ export function createServer(settings, { captureManager = createCaptureManager({
       }
 
       const normalizeResponses = req.url.startsWith("/responses") && !req.url.startsWith("/responses/compact");
-      const rewrite = rewriteRequestBody(body, { normalizeResponses });
+      const rewrite = rewriteRequestBody(body, { normalizeResponses, settings });
       if (rewrite.rewritten) {
         body = rewrite.body;
         bodyTransformed = true;
-        debugLog("REQUEST REWRITE", { model: "gpt-5.5", normalizedResponses: rewrite.normalized });
+        debugLog("REQUEST REWRITE", { model: settings.upstream.modelOverride || "gpt-5.5", normalizedResponses: rewrite.normalized });
       }
       if (req.url.startsWith("/responses/compact")) {
         log("info", "Compact request received", { request_id: requestId, path: req.url });

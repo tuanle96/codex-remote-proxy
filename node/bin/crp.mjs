@@ -755,6 +755,13 @@ function resolveUserSettings(options) {
         { value: saved.captureDbPath, source: "saved" }
       ],
       defaultValue: DEFAULT_CAPTURE_DB_PATH
+    }),
+    modelOverride: resolveConfigValue({
+      cliValue: options["model-override"],
+      envKey: "CRP_MODEL_OVERRIDE",
+      savedValues: [
+        { value: saved.modelOverride, source: "saved" }
+      ]
     })
   };
 }
@@ -784,6 +791,7 @@ async function installCommand(options) {
   const proxyUrl = `http://${listenHost}:${listenPort}`;
   const captureEnabled = Boolean(resolved.captureEnabled.value);
   const captureDbPath = ensureCaptureDbPath(resolved.captureDbPath.value);
+  const modelOverride = resolved.modelOverride?.value || null;
 
   const proxyConfig = {
     server: { host: listenHost, port: listenPort, logLevel: "info" },
@@ -794,7 +802,8 @@ async function installCommand(options) {
       verifySsl: true,
       authHeader: "authorization",
       authScheme: "Bearer",
-      extraHeaders: {}
+      extraHeaders: {},
+      modelOverride
     },
     proxy: {
       overrideAuthorization: true,
@@ -807,7 +816,24 @@ async function installCommand(options) {
   };
 
   ensureStateDirs();
-  writeProxyConfig(proxyConfigPath, proxyConfig);
+
+  // Only write proxy config if it doesn't exist or if explicitly requested
+  if (!existsSync(proxyConfigPath) || options["force-config"]) {
+    writeProxyConfig(proxyConfigPath, proxyConfig);
+  } else {
+    // Config exists, merge modelOverride if provided
+    try {
+      const existingConfig = JSON.parse(readFileSync(proxyConfigPath, "utf8"));
+      if (modelOverride && existingConfig.upstream) {
+        existingConfig.upstream.modelOverride = modelOverride;
+        writeProxyConfig(proxyConfigPath, existingConfig);
+      }
+    } catch {
+      // If read fails, write new config
+      writeProxyConfig(proxyConfigPath, proxyConfig);
+    }
+  }
+
   if (!existsSync(codexConfigPath)) {
     throw new Error(`Codex config not found: ${codexConfigPath}`);
   }
