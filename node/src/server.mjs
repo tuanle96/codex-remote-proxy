@@ -963,6 +963,115 @@ function chooseCompactResponse(response, cachedContext) {
   return { response: createCompactResponse(synthesizeCompactSummary(cachedContext)), quality, fallback: false, synthesized: true };
 }
 
+function upstreamJsonRequest(settings, pathname, payload) {
+  return new Promise((resolvePromise, reject) => {
+    const targetUrl = joinUrlPath(settings.upstream.baseUrl, pathname);
+    const transport = targetUrl.protocol === "https:" ? https : http;
+    const body = Buffer.from(JSON.stringify(payload));
+    const headers = {
+      "content-type": "application/json",
+      "content-length": String(body.length),
+      [settings.upstream.authHeader]: formatAuthorization(settings.upstream),
+      ...settings.upstream.extraHeaders
+    };
+
+    debugLog("UPSTREAM JSON REQUEST", {
+      pathname,
+      targetUrl: targetUrl.href,
+      headers: Object.fromEntries(Object.entries(headers).map(([key, value]) => [key, key.toLowerCase() === "authorization" ? maskSecret(value) : value])),
+      bodyBytes: body.length
+    });
+
+    const request = transport.request(
+      {
+        method: "POST",
+        protocol: targetUrl.protocol,
+        hostname: targetUrl.hostname,
+        port: targetUrl.port || undefined,
+        path: `${targetUrl.pathname}${targetUrl.search}`,
+        headers,
+        rejectUnauthorized: settings.upstream.verifySsl,
+        timeout: settings.upstream.timeoutMs
+      },
+      (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () => {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          if ((response.statusCode || 502) < 200 || (response.statusCode || 502) >= 300) {
+            reject(new Error(`Upstream ${pathname} failed with ${response.statusCode}: ${previewText(raw, 1000)}`));
+            return;
+          }
+          try {
+            resolvePromise(JSON.parse(raw));
+          } catch (error) {
+            reject(new Error(`Failed to parse upstream ${pathname} response: ${error.message}`));
+          }
+        });
+      }
+    );
+    request.on("timeout", () => request.destroy(new Error(`Upstream ${pathname} timed out`)));
+    request.on("error", reject);
+    request.end(body);
+  });
+}
+
+function compactContextPrompt(cachedContext, originalAnalysis, validation = null) {
+  const lines = [];
+  if (validation) {
+    lines.push("Previous compact attempt failed validation. Fix these issues exactly:");
+    lines.push(JSON.stringify(validation));
+    lines.push("");
+  }
+  lines.push("Create a compact execution handoff from this context.");
+  lines.push("");
+  lines.push("Compact request analysis:");
+  lines.push(JSON.stringify(originalAnalysis, null, 2));
+  lines.push("");
+  lines.push("Proxy context and local evidence:");
+  lines.push(buildCachedContextText(cachedContext) || "No cached context available.");
+  return lines.join("\n");
+}
+
+function extractChatCompletionText(response) {
+  const content = response?.choices?.[0]?.message?.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return extractTextParts(content).join("\n");
+  return "";
+}
+
+function validateLlmCompactText(text, cachedContext) {
+  const response = createCompactResponse(text);
+  const quality = compactOutputQuality(response, cachedContext);
+  const nextAction = String(text).match(/Next action:\s*([\s\S]*?)(?:\nDo not do:|$)/i)?.[1]?.trim() || "";
+  const badNextAction = !nextAction || nextAction.length < 12 || /^(unknown|none|n\/a)$/i.test(nextAction) || /\n-\s.*\n-\s/.test(nextAction);
+  return { ok: !quality.bad && !badNextAction, quality, badNextAction, nextAction };
+}
+
+async function runLlmCompact(settings, cachedContext, originalAnalysis) {
+  let validation = null;
+  for (let attempt = 0; attempt <= MAX_LLM_COMPACT_RETRIES; attempt += 1) {
+    const payload = {
+      model: "gpt-5.5",
+      messages: [
+        { role: "system", content: LLM_COMPACT_SYSTEM_PROMPT },
+        { role: "user", content: compactContextPrompt(cachedContext, originalAnalysis, validation) }
+      ],
+      temperature: 0.2,
+      max_tokens: 4096,
+      stream: false
+    };
+    const raw = await upstreamJsonRequest(settings, "/chat/completions", payload);
+    const text = extractChatCompletionText(raw).trim();
+    validation = validateLlmCompactText(text, cachedContext);
+    debugLog("LLM COMPACT ATTEMPT", { attempt, validation, text: previewText(text, 2000) });
+    if (validation.ok || attempt === MAX_LLM_COMPACT_RETRIES) {
+      return { response: createCompactResponse(text), validation, attempts: attempt + 1 };
+    }
+  }
+  throw new Error("LLM compact failed unexpectedly");
+}
+
 function buildHealthPayload(settings, captureManager) {
   return {
     ok: true,

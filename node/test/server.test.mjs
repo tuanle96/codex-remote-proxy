@@ -36,6 +36,122 @@ function requestJson(url, body) {
   });
 }
 
+function validCompactText() {
+  return [
+    "Current task:",
+    "Repair the compact proxy route after an upstream fork sync removed the local LLM compact helper implementation.",
+    "",
+    "User intent:",
+    "The user needs /responses/compact to return a valid Responses API handoff instead of a 502 ReferenceError.",
+    "",
+    "Repo / location:",
+    "/Users/tuan/Dev/VibeLab/codex-remote-proxy",
+    "",
+    "Current state:",
+    "The proxy intercepts compact requests and should call the configured chat completions provider directly.",
+    "",
+    "Important files:",
+    "- node/src/server.mjs: owns the compact route and LLM compact helper implementation.",
+    "- node/test/server.test.mjs: covers the compact route regression.",
+    "",
+    "Changes already made:",
+    "- Restored the compact helper path and regression coverage in the proxy test suite.",
+    "",
+    "Known verification:",
+    "- Passed: compact route regression test returned a completed response.",
+    "- Failed: None recorded.",
+    "- Not run: package release workflow.",
+    "",
+    "Unfinished work:",
+    "- Confirm the proxy process is restarted with the patched code.",
+    "",
+    "Next action:",
+    "Run npm test --prefix node and restart the local proxy process after the tests pass.",
+    "",
+    "Do not do:",
+    "- Do not forward /responses/compact to the upstream Responses endpoint.",
+    "- Do not reset or discard uncommitted changes.",
+    "",
+    "This extra detail keeps the compact response above the validator minimum length while preserving concrete state, files, verification, and next action. The content is intentionally deterministic for regression testing."
+  ].join("\n");
+}
+
+test("compact route uses chat completions helper and returns a compact response", async () => {
+  const dir = makeTempDir("crp-compact");
+  mkdirSync(dir, { recursive: true });
+  const upstreamCalls = [];
+
+  const upstreamServer = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      upstreamCalls.push({ url: req.url, authorization: req.headers.authorization, payload });
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({
+        choices: [{
+          message: {
+            content: validCompactText()
+          }
+        }]
+      }));
+    });
+  });
+  const upstreamPort = await listen(upstreamServer);
+
+  const { server, captureManager } = createApp({
+    configPath: join(dir, "proxy-config.json"),
+    server: {
+      host: "127.0.0.1",
+      port: 0,
+      logLevel: "info"
+    },
+    upstream: {
+      baseUrl: `http://127.0.0.1:${upstreamPort}`,
+      apiKey: "upstream-secret",
+      timeoutMs: 300000,
+      verifySsl: true,
+      authHeader: "authorization",
+      authScheme: "Bearer",
+      extraHeaders: {}
+    },
+    proxy: {
+      overrideAuthorization: true,
+      requestIdHeader: "x-client-request-id"
+    },
+    capture: {
+      enabled: false
+    }
+  });
+  const proxyPort = await listen(server);
+
+  const response = await requestJson(`http://127.0.0.1:${proxyPort}/responses/compact`, {
+    model: "gpt-5.4",
+    input: [{
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "compact this context" }]
+    }]
+  });
+
+  assert.equal(response.status, 200);
+  const json = await response.json();
+  assert.equal(json.status, "completed");
+  assert.match(json.output[0].content[0].text, /Current task:/);
+  assert.equal(upstreamCalls.length, 1);
+  assert.equal(upstreamCalls[0].url, "/chat/completions");
+  assert.equal(upstreamCalls[0].authorization, "Bearer upstream-secret");
+  assert.equal(upstreamCalls[0].payload.model, "gpt-5.5");
+
+  server.close();
+  await once(server, "close");
+  upstreamServer.close();
+  await once(upstreamServer, "close");
+  captureManager.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("server writes proxied request and response to sqlite", async () => {
   const dir = makeTempDir("crp-server");
   mkdirSync(dir, { recursive: true });
